@@ -1,0 +1,95 @@
+% Cloud Job-Processing Service -- design report (max 5 pages incl. diagrams)
+% Skeleton only: each section lists the points to cover and a page budget.
+% Compile with pdflatex/latexmk locally or upload the folder to Overleaf.
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=1.7cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\setlist{nosep,leftmargin=*}
+\setlength{\parskip}{3pt}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-1.5cm}Design of a Multi-Cloud Wildlife Image Job-Processing Service}
+\author{Lucas Huang}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-1.2cm}
+
+% ---------------------------------------------------------------- p1 (~1 page)
+\section{Overview, Assumptions and Architecture}
+% - One-paragraph summary: AWS + GCP; compute active-active, control plane
+%   active-passive; data-local placement; lease + fencing-epoch commit protocol.
+% - Compact assumptions table (from notes/assumptions.md): workload, GPU
+%   bottleneck (40 jobs/h, 2.5 h burst drain), VM budget split, bandwidth,
+%   egress ($1,080/mo naive vs ~$4/mo data-local), storage tiers, 3rd parties.
+% - Figure 1: architecture diagram (vector).
+% \begin{figure}[t]\centering
+%   \includegraphics[width=\linewidth]{../diagrams/architecture.pdf}
+%   \caption{Architecture overview.}\end{figure}
+
+% ---------------------------------------------------------------- p2 (~0.5)
+\section{Job Lifecycle}
+% - State machine: SUBMITTED -> ACCEPTED -> {PREP,ID,REPORT}_{QUEUED,RUNNING}
+%   -> COMPLETED | FAILED_NEEDS_REVIEW | CANCELLED.
+% - Walk one job end to end: presigned multipart upload -> checksum verify ->
+%   DB row + dual acceptance journal -> 202 -> stage leases -> publish pointer
+%   -> report replicated -> partner downloads via presigned GET.
+
+% ---------------------------------------------------------------- p2 (~0.6)
+\section{Job Coordination and Placement}
+% - Postgres as queue (SKIP LOCKED); pull-based leases; worker discovery by
+%   lease requests; resource matching (GPU taint), data-local scoring,
+%   GPU spill rule; fairness across tenants (per-tenant concurrency cap).
+
+% ---------------------------------------------------------------- p3 (~0.6)
+\section{VMs, Containers and Orchestration}
+% - EKS + GKE node pools, per-pool max = VM cap; spot CPU, on-demand GPU;
+%   scale-to-demand GPU with 1 warm node; one K8s Job per stage attempt.
+% - Images: one per stage, CUDA base for stage 2, pinned by digest, signed;
+%   model weights mounted read-only by SHA-256.
+% - Isolation: non-root, read-only rootfs, seccomp, no egress except storage,
+%   one attempt per pod, gVisor optional.
+% - IaC: Terraform modules per cloud + Helm/Argo CD; GitOps; CI via OIDC.
+
+% ---------------------------------------------------------------- p3 (~0.5)
+\section{Storage and ML Reproducibility}
+% - Table: data type -> store -> tier -> lifecycle -> durability.
+% - Per-job provenance record: image digests, model SHA-256, program versions,
+%   node type, driver/CUDA versions, input checksums, attempt id.
+
+% ---------------------------------------------------------------- p4 (~0.7)
+\section{Health and Recovery}
+% - Readiness (startup probe loads model), liveness, heartbeat-renewed lease,
+%   stall = no progress signal for T, per-stage timeout = 2x p99.
+% - Recovery paths; infra vs program failure; node health score; poison jobs.
+% - Key metrics/logs: queue depth & ETA, lease expiries, attempt counts,
+%   GPU util, stage duration p50/p99, egress bytes, per-tenant errors.
+
+% ---------------------------------------------------------------- p4 (~0.5)
+\section{Failure Scenario: GPU VM Lost After Writing Output}
+% - Timeline table t0..t5; attempt dirs + fencing epoch + conditional publish;
+%   optional adoption of verified orphan; returning VM gets 409 and is GC'd.
+
+% ---------------------------------------------------------------- p5 (~0.6)
+\section{Multi-Cloud Operation}
+% - Strategy statement; HA VPN; replication (DB async, reports both clouds,
+%   inputs NOT replicated -- justify by egress); egress mitigation; failover
+%   sequence with witness + self-fencing; degraded capacity (20 jobs/h);
+%   failback.
+
+% ---------------------------------------------------------------- p5 (~0.6)
+\section{Cloud Security}
+% - OIDC partner auth, tenant claim -> RLS + bucket-per-tenant + KMS key per
+%   tenant; workload identity + per-lease down-scoped creds; secrets manager;
+%   private subnets, no public worker IPs, mTLS, TLS 1.2+, SSE-KMS; audit logs.
+
+% ---------------------------------------------------------------- p5 (~0.2)
+\section{Key Trade-offs and Limitations}
+
+\end{document}
