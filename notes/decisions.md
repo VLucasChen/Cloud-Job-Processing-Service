@@ -25,9 +25,11 @@ Status legend: `PROPOSED` (recommended, awaiting decision) ·
   1. Active-passive for everything (GCP idle until failover)
   2. **Compute active-active, control plane active-passive**
   3. Fully active-active (multi-master DB such as CockroachDB/Spanner)
-- **Recommendation:** (2). Both clouds' workers run jobs every day, so failover
-  capacity is always warm and tested. The metadata DB has one writer (AWS) and an
-  async replica in GCP that gets promoted on failure.
+- **Recommendation:** (2). Both clouds run the stateless job service and workers
+  every day, so failover capacity is always warm and tested. The only singleton is the
+  metadata DB writer (AWS); GCP's job service writes to it over the VPN, and GCP holds an
+  async replica that is promoted on failure (gated by a third-party witness to prevent
+  split-brain).
 - **Trade-off:** (3) needs ≥ 3 regions for quorum and adds a third-party
   dependency. That is overkill at 100 jobs/day. The cost of (2) is an RPO of a few seconds for
   metadata, which is covered by the dual-written acceptance journal (D8) and idempotent
@@ -67,8 +69,11 @@ Status legend: `PROPOSED` (recommended, awaiting decision) ·
   (EKS + GKE)** · Nomad multi-region
 - **Recommendation:** EKS + GKE. Use node pools with taints (GPU pool only runs
   the identify stage), cluster autoscaler with hard `max` per pool (enforces the VM
-  cap), one Kubernetes Job per stage attempt, NetworkPolicies, and workload identity. Our
-  coordinator is the *cross-cloud* scheduler, and K8s only runs pods within one cloud.
+  cap), NetworkPolicies, and workload identity. KEDA **ScaledJobs** create one
+  **single-use runner pod per queued lease**: the pod claims one lease, runs one attempt,
+  exits. Every tenant job therefore gets a fresh filesystem. API + coordinator are one
+  stateless "job service" (Fargate / Cloud Run). It is the *cross-cloud* scheduler, and K8s
+  only runs pods within one cloud.
 - **Trade-off:** running two clusters is operationally heavy for a small team.
   Plain VMs are simpler but would need hand-built isolation, scaling and health checks.
 - **Decision:**

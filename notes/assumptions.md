@@ -4,9 +4,17 @@ Working notes behind the "Assumptions" part of the report. Every number here
 is a planning figure, not a quote. Where a figure drives a design choice, the
 choice is named in **bold**. Items marked `[CONFIRM]` still need your decision.
 
-Clouds used throughout: **AWS (primary control plane) + GCP**, both in Sydney
-(`ap-southeast-2`, `australia-southeast1`) `[CONFIRM]`, so they sit in the same
-metro area (low inter-cloud latency, data stays in one jurisdiction).
+Clouds used throughout: **AWS (primary DB) + GCP**, both in Sydney
+(`ap-southeast-2`, `australia-southeast1`).
+
+- Sydney rather than Melbourne: it is the larger region for both providers, with the
+  widest GPU instance choice. Users submit batch jobs of 5–30 min, so the ~12 ms
+  Melbourne–Sydney RTT does not matter.
+- Same metro for both clouds → low inter-cloud latency; all data stays in Australia.
+  This matters because camera traps also photograph people, so images may be personal
+  information under the Privacy Act.
+- Considered and rejected: one cloud in Sydney and one in Melbourne (better geographic
+  independence, but fewer GPU options in Melbourne and higher inter-cloud latency).
 
 ---
 
@@ -72,7 +80,7 @@ metro area (low inter-cloud latency, data stays in one jurisdiction).
 |---|---|---|
 | Partner → object storage | aggregate burst 100 × 3 GB / 1 h = 300 GB/h ≈ **670 Mbps**; per partner ≥ 100 Mbps → 3 GB in about 4 min | **Direct multipart upload with presigned URLs** (resumable, per-part checksums). The API never carries file bytes |
 | VM ↔ object storage (same cloud) | ≥ 5 Gbps | 3 GB in about 5–10 s, negligible next to compute |
-| AWS ↔ GCP | HA VPN, 2 IPsec tunnels × ~1.25 Gbps (AWS per-tunnel limit) ≈ 2.5 Gbps; same-metro RTT < 5 ms | Enough for metadata, reports and occasional spill. A dedicated interconnect is not justified at < 10 TB/month |
+| AWS ↔ GCP | GCP HA VPN ↔ 2 AWS Site-to-Site VPN connections = 4 IPsec tunnels × ~1.25 Gbps (AWS per-tunnel limit); plan on ≈ 2.5 Gbps usable; same-metro RTT < 5 ms | Enough for metadata, reports and occasional spill. A dedicated interconnect is not justified at < 10 TB/month |
 | Metadata DB replication | KB/s | negligible |
 
 ---

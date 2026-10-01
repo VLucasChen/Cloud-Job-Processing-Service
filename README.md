@@ -6,20 +6,31 @@ Due **Fri 9 Oct 2026 23:55**. Design only, no implementation.
 
 > Keep this repository **private** until after the deadline (grading is rank-based).
 
+**Status:** draft v1 (4 pages), still to be revised. See `notes/decisions.md`.
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `report/main.tex` | The report (LaTeX, Overleaf-compatible). Currently a section skeleton with page budgets |
-| `diagrams/` | Architecture diagram source + exported vector PDF/SVG |
+| `report/main.tex` → `report/main.pdf` | The report (LaTeX, Overleaf-compatible) |
+| `diagrams/architecture.tex` → `.pdf` | Architecture diagram (TikZ, vector) |
 | `notes/assumptions.md` | Sizing calculations and stated assumptions (bandwidth, pricing, egress, storage tiers, third parties) |
-| `notes/decisions.md` | Design decision log: options, recommendation, trade-off, and your decision |
+| `notes/decisions.md` | Design decision log: options, recommendation, trade-off, and my decision |
+
+## Build
+
+```bash
+cd diagrams && latexmk -pdf architecture.tex   # only after editing the diagram
+cd ../report && latexmk -pdf main.tex
+```
+
+On Overleaf: upload `report/` and `diagrams/` keeping the folder structure, set `report/main.tex` as the main file.
 
 ## Plan
 
-| Days | Work |
+| Day | Work |
 |---|---|
-| 1–2 (Oct 1–2) | Confirm decisions, finalise assumptions, draw architecture diagram |
-| 3–5 (Oct 3–5) | Write report body |
-| 6–7 (Oct 6–7) | Trim to 5 pages, polish figures, export PDF |
-| 8 (Oct 8) | Buffer |
+| until Tue 6 Oct | A1 interview |
+| Wed 7 Oct | Read draft v1, decide D1–D11, mark disagreements |
+| Thu 8 Oct | Rewrite key sections in my own words; failure scenario + multi-cloud deep pass; fit to 5 pages |
+| Fri 9 Oct | Final proofread, export PDF, submit by afternoon |

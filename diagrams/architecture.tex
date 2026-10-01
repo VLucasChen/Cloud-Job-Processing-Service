@@ -1,0 +1,127 @@
+% Architecture diagram (vector). Build: latexmk -pdf architecture.tex
+\documentclass[tikz,border=2pt]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usetikzlibrary{positioning,fit,arrows.meta,calc,backgrounds}
+
+\definecolor{awsB}{HTML}{C76A00}\definecolor{awsF}{HTML}{FFF6EA}
+\definecolor{gcpB}{HTML}{1A5FC8}\definecolor{gcpF}{HTML}{EEF4FE}
+\definecolor{stoF}{HTML}{E9F6EC}\definecolor{stoB}{HTML}{2E7D32}
+\definecolor{cmpF}{HTML}{F3EEFB}\definecolor{cmpB}{HTML}{6A4BA8}
+\definecolor{extF}{HTML}{F2F2F2}\definecolor{extB}{HTML}{555555}
+\definecolor{flow}{HTML}{C62828}\definecolor{rep}{HTML}{00796B}
+
+\tikzset{
+  font=\scriptsize,
+  box/.style={draw=#1, rounded corners=2pt, align=center, inner sep=2.5pt, line width=0.5pt},
+  ctl/.style={box=black!60, fill=white, minimum height=1.0cm},
+  sto/.style={box=stoB, fill=stoF, minimum height=0.95cm},
+  cmp/.style={box=cmpB, fill=cmpF, minimum height=1.0cm},
+  ext/.style={box=extB, fill=extF, minimum height=0.9cm},
+  arr/.style={-{Stealth[length=4pt]}, line width=0.6pt},
+  biarr/.style={{Stealth[length=4pt]}-{Stealth[length=4pt]}, line width=0.6pt},
+  stepn/.style={circle, fill=flow, text=white, inner sep=0.7pt, font=\tiny\bfseries},
+  lbl/.style={font=\tiny, align=center, inner sep=1pt},
+}
+
+% One cloud = 4 rows. #1 = +1 (AWS, left) or -1 (GCP, mirrored), #2 = x origin.
+\begin{document}
+\begin{tikzpicture}
+
+% ================= top row: external services
+\node[ext, minimum width=3.2cm] (users) at (1.6,9.55)
+  {\textbf{Partner users / scripts}\\one tenant per partner};
+\node[ext, minimum width=3.0cm] (idp) at (5.05,9.55)
+  {\textbf{Partner IdP} (OIDC + MFA)\\JWT carries \texttt{tenant\_id}};
+\node[ext, minimum width=3.6cm] (dns) at (8.8,9.55)
+  {\textbf{Global DNS + health checks}\\provider-neutral third party};
+\node[ext, minimum width=4.0cm] (wit) at (15.6,9.55)
+  {\textbf{Failover witness}\\DB-leadership lease (third party)};
+
+% ================= AWS (left)
+\node[ctl, minimum width=3.8cm] (jobA) at (2.15,7.7)
+  {\textbf{Job service}\\Fargate, stateless, $\geq$2 tasks\\API $\cdot$ leases $\cdot$ reaper $\cdot$ GC};
+\node[ctl, minimum width=3.05cm, fill=awsF!60] (dbA) at (6.075,7.7)
+  {\textbf{RDS PostgreSQL}\\PRIMARY, Multi-AZ\\jobs $\cdot$ leases $\cdot$ epochs};
+\node[cmp, minimum width=3.5cm] (cpuA) at (2.0,5.95)
+  {\textbf{CPU pool}: spot, 1--8 VMs\\stage 1 prep $\cdot$ stage 3 report};
+\node[cmp, minimum width=3.5cm] (gpuA) at (5.85,5.95)
+  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (A10G)};
+\node[sto, minimum width=7.35cm, text width=7.15cm] (s3) at (3.925,4.35)
+  {\textbf{S3: one bucket per tenant} (SSE-KMS, per-tenant key)\\
+   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{k\}/} (immutable) $\cdot$ \texttt{reports/} (WORM) $\cdot$ \texttt{journal/}}};
+\node[anchor=west, align=left, font=\tiny] (noteA) at (0.25,3.2)
+  {\scriptsize\textbf{\textcolor{awsB}{AWS ap-southeast-2 (Sydney)}}\\
+   EKS $\cdot$ KEDA ScaledJobs (single-use runner pods)\\GPU taints $\cdot$ ECR (digest-pinned, signed)};
+\node[ctl, minimum width=2.4cm, minimum height=0.8cm] (kmsA) at (6.4,3.2)
+  {\textbf{KMS + Secrets Mgr}\\no static keys};
+\begin{scope}[on background layer]
+\node[box=awsB, fill=awsF, line width=0.9pt, fit=(jobA)(dbA)(cpuA)(gpuA)(s3)(noteA)(kmsA), inner sep=5pt] (aws) {};
+\end{scope}
+
+% ================= GCP (right, mirrored: x' = 17.6 - x)
+\node[ctl, minimum width=3.8cm] (jobG) at (15.45,7.7)
+  {\textbf{Job service}\\Cloud Run, stateless, active\\writes go to the primary DB};
+\node[ctl, minimum width=3.05cm, fill=gcpF!60] (dbG) at (11.525,7.7)
+  {\textbf{Cloud SQL PostgreSQL}\\async REPLICA\\promotable};
+\node[cmp, minimum width=3.5cm] (cpuG) at (15.6,5.95)
+  {\textbf{CPU pool}: spot, 1--8 VMs\\stage 1 prep $\cdot$ stage 3 report};
+\node[cmp, minimum width=3.5cm] (gpuG) at (11.75,5.95)
+  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (L4)};
+\node[sto, minimum width=7.35cm, text width=7.15cm] (gcs) at (13.675,4.35)
+  {\textbf{GCS: one bucket per tenant} (CMEK, per-tenant key)\\
+   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{k\}/} (immutable) $\cdot$ \texttt{reports/} (copy of all) $\cdot$ \texttt{journal/}}};
+\node[anchor=east, align=right, font=\tiny] (noteG) at (17.35,3.2)
+  {\scriptsize\textbf{\textcolor{gcpB}{GCP australia-southeast1 (Sydney)}}\\
+   GKE $\cdot$ KEDA ScaledJobs (single-use runner pods)\\GPU taints $\cdot$ Artifact Registry (digest-pinned)};
+\node[ctl, minimum width=2.4cm, minimum height=0.8cm] (kmsG) at (11.2,3.2)
+  {\textbf{Cloud KMS + Secret Mgr}\\no static keys};
+\begin{scope}[on background layer]
+\node[box=gcpB, fill=gcpF, line width=0.9pt, fit=(jobG)(dbG)(cpuG)(gpuG)(gcs)(noteG)(kmsG), inner sep=5pt] (gcp) {};
+\end{scope}
+
+% ================= cross-cloud links (teal)
+\draw[arr, rep, dashed] (dbA.east) -- node[lbl, above, text=rep] {async\\repl.} (dbG.west);
+\draw[biarr, rep, dotted] (gpuA.east) -- node[lbl, above, text=rep] {GPU spill:\\prepared\\data only} (gpuG.west);
+\draw[biarr, rep, dashed] (s3.east) -- node[lbl, above, text=rep] {reports,\\journal} (gcs.west);
+\node[lbl, text=rep, font=\tiny\bfseries] at (8.8,3.2) {HA VPN\\(IPsec, BGP)\\+ mTLS};
+
+% ================= lifecycle (red, numbered)
+\draw[arr, flow] (users.east) -- node[stepn, above] {1} (idp.west);
+\draw[arr, flow] (users.south -| 1.3,0) -- node[stepn, left] {2} (jobA.north -| 1.3,0);
+\draw[biarr, flow] (users.west) -- ++(-0.4,0) |- node[stepn, pos=0.35, left] {3} node[stepn, pos=0.6, left] {7} (s3.west);
+\draw[arr, flow] (jobA.east) -- node[stepn, above] {4} (dbA.west);
+\draw[arr, flow] (cpuA.north -| 1.2,0) -- node[stepn, left] {5} (jobA.south -| 1.2,0);
+\draw[arr, flow] (gpuA.north -| 5.2,0) |- (3.5,6.85) -- (jobA.south -| 3.5,0);
+\draw[biarr, flow] (cpuA.south) -- node[stepn, right] {6} (cpuA.south |- s3.north);
+\draw[biarr, flow] (gpuA.south) -- (gpuA.south |- s3.north);
+\draw[arr, flow] (cpuG.north -| 16.4,0) -- (jobG.south -| 16.4,0);
+\draw[arr, flow] (gpuG.north -| 12.4,0) |- (14.1,6.85) -- (jobG.south -| 14.1,0);
+\draw[biarr, flow] (cpuG.south) -- (cpuG.south |- gcs.north);
+\draw[biarr, flow] (gpuG.south) -- (gpuG.south |- gcs.north);
+\draw[arr, black!60] (jobG.west) -- (dbG.east);
+
+% ================= DNS + witness (grey, dashed)
+\draw[dashed, extB, arr] (dns.south -| 8.4,0) -- ++(0,-0.3) -| (jobA.north -| 3.0,0);
+\draw[dashed, extB, arr] (dns.south -| 9.2,0) -- ++(0,-0.3) -| (jobG.north -| 14.0,0);
+\draw[dashed, extB, biarr] (wit.south -| 16.6,0) -- (jobG.north -| 16.6,0);
+\draw[dashed, extB, biarr] (wit.south -| 14.4,0) -- ++(0,-0.55) -| (jobA.north -| 3.7,0);
+
+% ================= bottom row
+\node[ext, minimum width=8.6cm, text width=8.4cm, anchor=north west] (obs) at ($(aws.south west)+(0,-0.2)$)
+  {\textbf{Observability}: logs, metrics, traces per cloud $\rightarrow$ central dashboards + alerts\\{\tiny queue age $\cdot$ lease expiries $\cdot$ retries $\cdot$ GPU util $\cdot$ VMs vs.\ cap $\cdot$ replication lag $\cdot$ egress}
+};
+\node[ext, minimum width=8.6cm, text width=8.4cm, anchor=north east] (ci) at ($(gcp.south east)+(0,-0.2)$)
+  {\textbf{CI/CD + IaC}: GitHub Actions (OIDC) $\rightarrow$ Terraform (both clouds)\\{\tiny Helm + Argo CD (GitOps) $\cdot$ images built once, signed, pushed to both registries}
+};
+
+\node[anchor=north west, font=\tiny, align=left, text width=17.3cm] at ($(obs.south west)+(0,-0.1)$)
+  {\textcolor{flow}{\textbf{Job lifecycle}}: (1) log in; (2) \texttt{POST /jobs} via DNS to a healthy job service;
+   (3) multipart upload straight to presigned URLs in the home cloud; (4) on \texttt{submit}: checksums verified, row committed, journal written to \emph{both} clouds, \texttt{202 Accepted};
+   (5) runners pull a lease for their pool; (6) read the published input, write their own attempt prefix, commit with the fencing epoch;
+   (7) report copied to both clouds, then downloaded via a presigned URL.
+   \textcolor{rep}{\textbf{Teal}}: cross-cloud traffic. Managed control plane is outside the 20-VM cap (16 CPU + 4 GPU worker VMs).};
+
+\end{tikzpicture}
+\end{document}
