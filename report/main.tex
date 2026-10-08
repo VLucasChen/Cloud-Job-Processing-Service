@@ -18,8 +18,6 @@
 \setlength{\parindent}{0pt}
 \titlespacing*{\section}{0pt}{6pt}{2pt}
 \titleformat*{\section}{\large\bfseries}
-\titlespacing*{\subsection}{0pt}{4pt}{1pt}
-\titleformat*{\subsection}{\normalsize\bfseries}
 \newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 \renewcommand{\arraystretch}{1.08}
 
@@ -33,42 +31,49 @@ Lucas Huang
 % =====================================================================
 \section{Overview, Assumptions and Key Decisions}
 Partners upload a 1--5\,GB image batch; each job runs \emph{prep} (CPU) $\rightarrow$
-\emph{species ID} (GPU) $\rightarrow$ \emph{report} (CPU). The design rests on three ideas:
-(i)~one transactional store (PostgreSQL) holds job state, the queue and leases, so there is never a
-dual-write between a queue and a database;
-(ii)~workers \emph{pull} leases carrying a monotonically increasing \emph{fencing epoch}, and outputs
-are written to per-attempt immutable prefixes and published by a conditional update,
-so a result is published exactly once even if a worker reappears;
-(iii)~\emph{compute is active-active across AWS and GCP, state is active-passive}, and every job is
-processed \emph{data-locally} in its home cloud to avoid egress.
+\emph{species ID} (GPU) $\rightarrow$ \emph{report} (CPU). Four principles drive the design.
+(i)~One transactional store (PostgreSQL) holds job state, the queue and leases, so there is never a
+dual-write between a queue and a database.
+(ii)~\emph{Execution is at-least-once, publication is exactly-once}: workers pull fenced leases, write
+create-only per-attempt objects, and a conditional database update publishes exactly one attempt.
+(iii)~A result becomes \emph{visible} only after a small receipt for it exists in \emph{both} clouds, so
+a lagging replica can be reconciled without producing a conflicting result.
+(iv)~\emph{Compute is active-active across AWS and GCP, the database writer is active-passive}, and
+jobs run data-locally to avoid egress. When safety and write availability conflict during an
+ambiguous partition, safety wins.
 
 \begin{table}[H]\centering\small
-\begin{tabularx}{\linewidth}{@{}p{3.1cm}Y@{}}
+\begin{tabularx}{\linewidth}{@{}p{2.9cm}Y@{}}
 \toprule
 \textbf{Assumption} & \textbf{Value and consequence} \\ \midrule
 Workload & 100 jobs/day; burst 100/h; mean batch 3\,GB ($\approx$1{,}000 JPEGs); mean job 15\,min split
-  5/6/4\,min (prep/ID/report); prep output $\approx$5--10\% of input (resized images). \\
-GPU is the bottleneck & 4 GPUs $\times$ 60/6 = \textbf{40 jobs/h}. A 100-job burst drains in \textbf{2.5\,h}
-  (worst case, all 30-min jobs: 5\,h) $\Rightarrow$ durable queue, ETA shown to users, acceptance never
-  blocks on capacity. Daily GPU use is 10 of 96 GPU-h ($\approx$10\%) $\Rightarrow$ GPU pools scale 0--2 per cloud. \\
-CPU sizing & Burst prep 100$\times$5\,min $\approx$ 9 VMs; report is GPU-bound (40$\times$4\,min $\approx$ 3 VMs)
-  $\Rightarrow$ $\approx$12 of 16 CPU VMs at peak. \\
-VM cap & Worker VMs only: per cloud 0--2 GPU + 1--8 CPU = \textbf{10 per cloud, 20 total}. The control
-  plane (API, DB, storage, K8s masters) is managed/serverless. If it must count, 1 VM per cloud is
-  carved out, leaving 18 workers, which still covers peak demand. \\
-Network & Partner $\rightarrow$ storage burst 300\,GB/h $\approx$ 670\,Mbps aggregate (direct multipart
-  upload, not via the API). VM $\leftrightarrow$ object store $\geq$5\,Gbps. AWS$\leftrightarrow$GCP HA VPN
-  (4 tunnels $\times$ 1.25\,Gbps) $\approx$2.5\,Gbps usable, same-metro RTT $<$5\,ms. \\
-Pricing (indicative) & Egress $\approx$\$0.12/GB; GPU VM $\approx$\$1.2/h; standard object storage
-  $\approx$\$0.025/GB-month. Always-on 4 GPUs $\approx$\$3.5k/month vs.\ scale-to-demand
-  ($\approx$10 GPU-h/day + 1 warm GPU in business hours) $\approx$\$0.8k/month, at the cost of a
-  $\approx$5\,min cold start. \\
-Regions & Both clouds in Sydney: widest Australian GPU supply; data stays in Australia
-  (camera traps can capture people, so images may be personal information). \\
-Third parties & Partner OIDC IdP; provider-neutral DNS with health checks; a small serverless
-  witness for DB leadership; GitHub Actions. Supplied programs are CLI tools (input dir $\rightarrow$
-  output dir, exit code); model weights ($\approx$1\,GB) are kept in our own buckets, so nothing is
-  pulled from public hubs at run time. \\
+  5/6/4\,min (prep/ID/report); prep output $\approx$5--10\% of input. These are sizing hypotheses,
+  to be benchmarked on each VM type. \\
+GPU is the bottleneck & 4 GPUs $\times$ 60/6 = \textbf{40 jobs/h}. A 100-job burst needs $\geq$\textbf{2.5\,h} of
+  GPU service plus pipeline fill and cold start; $\approx$60 jobs still wait at the end of the burst hour
+  $\Rightarrow$ durable queue, ETA shown to users, and acceptance never blocks on capacity. Daily GPU use
+  is $\approx$10 of 96 GPU-h ($\approx$10\%) $\Rightarrow$ GPU pools scale 0--2 per cloud. \\
+CPU sizing & Burst prep 100$\times$5\,min $\approx$ 8.3 VMs; report is GPU-bound (40$\times$4\,min $\approx$ 2.7 VMs)
+  $\Rightarrow$ $\approx$11 of 14 CPU workers at peak, if placement is balanced. \\
+VM cap & Per cloud: 1 on-demand system node (KEDA, CoreDNS, agents) + 0--7 CPU + 0--2 GPU = 10, so
+  \textbf{2 + 14 + 4 = 20}. Managed services (RDS/Cloud SQL, EKS/GKE masters, Fargate/Cloud Run,
+  object storage) are assumed outside the cap; if not, the CPU ceiling drops accordingly. \\
+Network & Partner $\rightarrow$ storage burst 300\,GB/h $\approx$ 670\,Mbps (1.1\,Gbps if every batch is
+  5\,GB), so uploads go directly to storage, not through the API. VM $\leftrightarrow$ object store $\geq$5\,Gbps.
+  AWS$\leftrightarrow$GCP: 4 IPsec tunnels, but one flow is capped at $\approx$1.25\,Gbps per tunnel;
+  plan on 1\,Gbps effective (to be measured); same-metro RTT $<$5\,ms. \\
+Pricing (planning figures, not quotes) & Egress $\approx$\$0.12/GB; GPU VM $\approx$\$1.2/h; standard object storage
+  $\approx$\$0.025/GB-month. Always-on 4 GPUs $\approx$\$3.5k/month vs.\ on demand
+  ($\approx$10 GPU-h/day + 1 warm GPU in business hours) $\approx$\$0.8k/month, for a cold start of
+  $\approx$5\,min (to be measured). \\
+Regions & Both clouds in Sydney: widest Australian GPU supply; data stays in Australia (camera traps
+  also photograph people, so images can be personal information). Prefer the same GPU model in both
+  clouds (e.g.\ NVIDIA L4) where quota allows, because different GPUs give slightly different
+  floating-point results. \\
+Third parties & Partner OIDC IdP; provider-neutral DNS with health checks; a strongly consistent
+  serverless lease store as failover witness; GitHub Actions. Supplied programs are CLI tools (input dir
+  $\rightarrow$ output dir, exit code). Images and model weights ($\approx$1\,GB) are mirrored into our
+  own registries and buckets before release, so nothing is pulled from public hubs at run time. \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -84,222 +89,277 @@ Third parties & Partner OIDC IdP; provider-neutral DNS with health checks; a sma
 
 % =====================================================================
 \section{One Job's Lifecycle}
-\textbf{States:} \texttt{UPLOADING} $\rightarrow$ \texttt{ACCEPTED} $\rightarrow$
-for each stage \texttt{QUEUED} $\rightarrow$ \texttt{RUNNING} $\rightarrow$ \texttt{SUCCEEDED}
-$\rightarrow$ \texttt{COMPLETED}; side exits \texttt{FAILED\_NEEDS\_REVIEW}, \texttt{CANCELLED}.
-(1)~The partner logs in through its IdP and gets a JWT carrying \texttt{tenant\_id}.
-(2)~\texttt{POST /jobs} (file list, sizes, SHA-256) reaches a healthy job service. The job service picks
-the \emph{home cloud} (healthy, lowest estimated wait) and returns presigned multipart-upload URLs
-scoped to \texttt{jobs/\{id\}/input/} in the tenant bucket (15\,min).
+\begin{sloppypar}
+\textbf{States.} Job: \texttt{UPLOADING} $\rightarrow$ \texttt{ACCEPTANCE\_PENDING} $\rightarrow$
+\texttt{ACCEPTED} $\rightarrow$ \texttt{RUNNING} $\rightarrow$ \texttt{COMPLETED}; side exits
+\texttt{FAILED\_NEEDS\_REVIEW}, \texttt{CANCELLED}. Each stage: \texttt{QUEUED} $\rightarrow$
+\texttt{RUNNING} $\rightarrow$ \texttt{PUBLISHING} $\rightarrow$ \texttt{SUCCEEDED}, with \texttt{RETRY\_WAIT} and \texttt{FAILED}.
+(1)~The partner signs in through its IdP. The job service validates the JWT (issuer, audience,
+signature, expiry) and maps the partner to a tenant on the server side.
+(2)~\texttt{POST /jobs} (file list, sizes, SHA-256) picks the home cloud (healthy, earliest estimated
+finish) and returns per-object multipart-upload URLs scoped to \texttt{jobs/\{id\}/input/} in the tenant
+bucket (15\,min, renewable after re-authentication for slow links).
 (3)~The client uploads directly; failed parts are retried individually.
-(4)~\texttt{POST /jobs/\{id\}:submit} (with an \texttt{Idempotency-Key}) verifies checksums, commits
-\texttt{ACCEPTED} + \texttt{PREP\_QUEUED}, writes a small acceptance record to \emph{both} clouds' journals,
-and only then returns \texttt{202} with the job ID.
-(5)~A CPU runner in the home cloud claims the prep lease;
-(6)~it reads the input, writes \texttt{stage1/attempt-k/} and commits. That commit queues the GPU stage in
-the same transaction, and stage 3 follows the same way.
-(7)~The report is copied to both clouds; only then is the job \texttt{COMPLETED}. A notification
-(transactional outbox) is sent, and \texttt{GET /jobs/\{id\}/report} returns a 5-minute presigned URL.
-\texttt{GET /jobs/\{id\}} shows the stage, queue position and ETA at any time.
+(4)~\texttt{POST /jobs/\{id\}:submit} carries a tenant-scoped \texttt{Idempotency-Key}. The service verifies
+sizes and SHA-256 (multipart ETags are not content hashes) and commits \texttt{ACCEPTANCE\_PENDING} with an
+outbox item. It then writes an immutable \emph{acceptance receipt} (input versions and hashes, home cloud,
+pinned image and model versions) to both clouds, commits \texttt{ACCEPTED} + \texttt{PREP\_QUEUED}, and only
+then returns \texttt{202}. A retry with the same key resumes the same job. Lack of capacity only means
+queueing.
+(5)~A ready CPU runner in the home cloud claims the prep lease.
+(6)~It writes \texttt{stage1/attempt-\{uuid\}/} and the coordinator publishes it (\S\ref{sec:fail}), which
+queues stage 2; stage 3 follows the same way.
+(7)~The report is copied and checksum-verified in both clouds and a completion receipt is mirrored. One
+transaction then records \texttt{COMPLETED}, both object versions and a notification outbox event. Notifications are
+at-least-once with a stable event ID for de-duplication. \texttt{GET /jobs/\{id\}} shows stage, queue
+position and ETA; reports download via 5-minute presigned URLs.
+\end{sloppypar}
 
 % =====================================================================
 \section{Job Coordination and Placement}
 \textbf{Acceptance and tracking.} The \texttt{jobs} and \texttt{stage\_runs} tables are the single source of
-truth. Each stage row holds \texttt{status}, \texttt{epoch}, \texttt{lease\_owner},
-\texttt{lease\_expires\_at} (database clock only, never worker clocks) and \texttt{published\_attempt}.
-Load is $<$1\,write/s, far below PostgreSQL limits, so a separate broker (SQS/PubSub) would add a
-dual-write hazard without benefit.
+truth. Each stage row holds \texttt{status}, \texttt{epoch}, \texttt{attempt\_id}, \texttt{owner},
+\texttt{lease\_expires\_at} (database clock only) and \texttt{published\_attempt}. Load is $<$1\,write/s, so
+a separate broker (SQS/Pub/Sub) would add a dual-write hazard without benefit.
 
 \textbf{Worker discovery and assignment (pull).} A small \emph{runner agent} is baked into each stage image.
-It calls \texttt{POST /leases} with its capabilities (\texttt{cloud}, \texttt{stage}, \texttt{gpu},
-\texttt{mem\_gb}). The coordinator selects a row with \texttt{SELECT \ldots FOR UPDATE SKIP LOCKED} and,
-in the same transaction, sets \texttt{RUNNING}, increments \texttt{epoch}, and sets the lease to 90\,s.
-It returns \texttt{(job, stage, attempt, epoch)} plus credentials scoped to that job (\S\ref{sec:sec}).
-Workers therefore need no registry: a worker exists while it is renewing leases, and VMs that never ask
-receive no work. Pull also balances load naturally, because idle runners take the next item.
+It authenticates with workload identity and calls \texttt{POST /leases} with its capabilities
+(\texttt{cloud}, \texttt{pool}, allocatable memory, GPU model and VRAM, readiness), which the coordinator
+checks against the pool's configured identity. The coordinator selects an eligible row with
+\texttt{SELECT \ldots FOR UPDATE SKIP LOCKED} and, in the same transaction, sets \texttt{RUNNING},
+increments \texttt{epoch}, creates a new \texttt{attempt\_id}, records the owner and sets a 90\,s lease. The
+runner renews the lease every 30\,s. No registry is needed: a worker exists while it holds or requests
+leases. Pull also balances load naturally, because idle runners take the next item.
 
-\textbf{Stage dependencies.} A stage becomes \texttt{QUEUED} only inside the transaction that publishes
-its predecessor; downstream stages read only the \emph{published} attempt pointer, never a prefix
-listing.
+\textbf{Stage dependencies.} A stage becomes \texttt{QUEUED} only after its predecessor is published and that
+publication is receipted (\S\ref{sec:mc}). Consumers read only the \emph{published} manifest, never a
+prefix listing.
 
-\textbf{Resources and placement.} At submission each job gets a size class (S/M/L by batch size), which
-maps to a memory requirement. A lease matches only if the runner's pool satisfies it: GPU stages run only
-on tainted GPU pools, and L-class prep runs on the 32\,GB node group. Ordering is \emph{weighted fair
-share across tenants}, then oldest first, with a per-tenant cap of 2 concurrent GPU stages, so one
-partner's 50-job burst cannot starve the others.
-\textbf{Data-local placement:} prep runs in the home cloud. The GPU stage \emph{spills} to the other
-cloud only if $\mathrm{ETA}_{home} > \mathrm{ETA}_{other} + t_{transfer} + 20\,\mathrm{min}$ (hysteresis);
-it then moves the \emph{prepared} output ($\approx$150\,MB, $\approx$\$0.02) rather than the raw
-3\,GB batch ($\approx$\$0.36). The report stage has small inputs and runs on whichever cloud has a free
-CPU runner.
+\textbf{Resources and fairness.} At acceptance, each job gets a resource profile from image count and decoded
+image size (batch bytes alone do not predict peak memory) plus the model's VRAM. A lease matches only a
+compatible pool, and GPU stages run only on tainted GPU pools. Ordering is \emph{weighted fair share across
+tenants}, then oldest first. A per-tenant GPU concurrency cap (default 2) stops one partner's 50-job
+burst from starving the others; unused share may be borrowed.
+
+\textbf{Placement.} Work is placed by \emph{estimated finish time} (queue wait + measured stage runtime +
+transfer). Prep runs in the home cloud. Stage 2 \emph{spills} only if
+$\mathrm{ETA}_{remote} + t_{transfer} + 20\,\mathrm{min} < \mathrm{ETA}_{local}$ (hysteresis). It then copies and
+verifies the \emph{prepared} output ($\approx$150--300\,MB, $\approx$\$0.02--0.04) rather than the raw 3\,GB
+batch ($\approx$\$0.36). The report stage stays next to the identification output.
 
 % =====================================================================
 \section{VMs, Containers and Orchestration}
-\textbf{Provisioning (IaC).} Terraform modules per cloud (VPC, HA VPN, EKS/GKE, node pools, buckets with
-lifecycle rules, KMS, databases, IAM) plus a global stack (DNS, witness). State lives in an encrypted
-remote backend with locking. GitHub Actions runs \texttt{plan} on pull requests and \texttt{apply} after
-review, authenticating with OIDC federation (no cloud keys in CI). In-cluster objects are Helm charts
-synced by Argo CD (GitOps), so both clouds run identical, versioned manifests. Node pools enforce the cap
-in IaC (\texttt{max\_size}: GPU 2, CPU 8 per cloud), and an alert fires if the VM count reaches 19.
-Spot is used for CPU (a preemption is just another lease expiry); GPU is on-demand (scarce, only 4
-slots).
+\textbf{Provisioning (IaC).} Terraform modules per cloud (VPC, VPN/BGP, EKS/GKE, node pools, buckets with
+lifecycle rules, KMS, primary and standby databases, IAM) plus a global stack (DNS, witness). State is
+encrypted, locked and access-restricted. GitHub Actions runs \texttt{plan} on pull requests and
+\texttt{apply} after review, authenticating through OIDC federation, so CI holds no cloud keys. Helm charts
+synced by Argo CD keep both clusters on identical, versioned manifests. Schema migrations and failover
+drills are tested with each release.
 
-\textbf{Containers.} There is one image per stage: the supplied program + the runner agent, built once
-in CI, scanned, signed (cosign), pushed to both registries and deployed \emph{by digest}. The GPU image
-pins the CUDA base, framework versions and driver range. Model weights are \emph{not} baked in (the same
-pattern as my A1 SmartPark deployment): an init container fetches \texttt{model@version} from our bucket,
-verifies its SHA-256, and stores it in a node-local read-only cache, so restarts do not re-download it.
+\textbf{Holding the cap.} Node pools have \texttt{max\_size} system 1, CPU 7 and GPU 2 per cloud. The cap must
+also hold during upgrades and repairs. Surge is therefore disabled (EKS \texttt{MINIMAL} node-group updates, GKE
+zero-surge), so a node is removed before its replacement is created. Dedicated accounts and projects with
+restricted provisioning roles stop anyone adding pools outside Terraform, and an alert fires at 19 VMs.
+An \emph{unreachable} VM still counts: capacity is never reclaimed until its termination is confirmed.
+CPU workers use spot instances, because a preemption is just another lease expiry. GPU workers and system
+nodes are on-demand.
 
-\textbf{Isolation and scaling.} KEDA \emph{ScaledJobs} create one single-use pod per queued lease
-(trigger: queued count for that stage and cloud, from the coordinator's metrics endpoint). Each pod runs
-exactly one attempt and exits, so every tenant job gets a fresh filesystem. Pod requests ($\approx$90\%
-of a node) place one stage per VM. The cluster autoscaler adds and removes nodes within the pool bounds;
-GPU pools scale to zero after 10\,min idle, except one warm GPU in business hours. Pods run as non-root
-with a read-only root filesystem, all capabilities dropped and seccomp \texttt{RuntimeDefault}.
-NetworkPolicy is default-deny; the only egress allowed is to the coordinator and private storage
-endpoints, so a third-party program cannot exfiltrate data.
+\textbf{Containers.} Each stage has one image: the supplied program plus the runner agent and its
+libraries. Images are built once in CI, scanned, signed (cosign), pushed to both registries and deployed
+\emph{by digest}. The GPU image pins CUDA and framework versions and a tested host-driver range. Model
+weights are \emph{not} baked into the image (the same pattern as my A1 SmartPark deployment): an init
+container fetches \texttt{model@version} from our bucket, verifies its SHA-256, and stores it in a
+node-local, read-only, model-only cache. Tenant data never enters that cache.
+
+\textbf{Isolation and scaling.} KEDA \emph{ScaledJobs} launch one single-use pod per eligible queued lease, and
+count active and pending pods to avoid over-launching. A pod requests a lease only after its startup
+checks pass, runs exactly one attempt and exits; an empty pull exits at once. Every tenant job therefore
+gets a fresh pod with its own scratch \texttt{emptyDir}. Requests cover CPU, RAM, ephemeral disk and GPU,
+which places one attempt per worker VM while leaving room for node agents. The cluster autoscaler works
+within the pool bounds, and GPU pools scale to zero after 10\,min idle (one stays warm in business
+hours). Pods run as non-root with a read-only root filesystem, all capabilities dropped and seccomp.
+NetworkPolicy is default-deny: egress is allowed only to the coordinator, identity, DNS, model and storage
+endpoints. This sharply reduces, but cannot eliminate, the risk of a third-party program exfiltrating
+data.
 
 % =====================================================================
 \section{Storage and ML Reproducibility}
 \begin{table}[H]\centering\small
-\begin{tabularx}{\linewidth}{@{}p{2.3cm}p{3.6cm}Y@{}}
+\begin{tabularx}{\linewidth}{@{}p{1.9cm}p{3.0cm}Y@{}}
 \toprule
 \textbf{Data} & \textbf{Store} & \textbf{Durability, lifecycle and cleanup} \\ \midrule
-Inputs & S3/GCS, bucket per tenant, home cloud & Object stores are designed for 11 nines; versioned. Deleted 30\,days after the job
-  ends (partners keep originals). Not replicated cross-cloud (9\,TB/month would cost $\approx$\$1{,}080/month in egress). \\
-Intermediates & same bucket, \texttt{stage\{n\}/attempt-\{k\}/} & Immutable, \texttt{\_MANIFEST.json} (files + SHA-256) written \emph{last}.
-  Unpublished attempts are GC'd after 24\,h; published ones 7\,days after the job ends. \\
-Reports & both clouds, \texttt{reports/} & Versioning + object lock (WORM, 1\,year); copied to the second cloud \emph{before} \texttt{COMPLETED}
-  (RPO\,=\,0); Infrequent Access tier after 30\,days. \\
-Metadata & RDS PostgreSQL (Multi-AZ) $\rightarrow$ Cloud SQL replica & PITR 14\,days, daily snapshot, async logical replica in GCP
-  (lag typically $<$5\,s). Acceptance journal in both clouds closes the lag gap. \\
+Inputs & S3/GCS, bucket + key per tenant, home cloud & Versioned. Deleted 30\,days after the job ends (longer while under review);
+  partners keep originals. Not replicated cross-cloud ($\approx$9\,TB/month $\approx$ \$1{,}080 egress), so a
+  home-storage outage pauses those jobs. \\
+Intermediates & same bucket,\newline \texttt{stage\{n\}/}\newline\texttt{attempt-\{uuid\}/} & \emph{Create-only} writes (S3 \texttt{If-None-Match},
+  GCS \texttt{ifGenerationMatch=0}); \texttt{\_MANIFEST.json} (object versions + SHA-256) is written last. GC checks
+  DB references and leases, deletes unpublished attempts after 24\,h and published ones 7\,days after the
+  job ends, and pauses whenever the database is unavailable. \\
+Reports & both clouds, \texttt{reports/} & Verified in both clouds before \texttt{COMPLETED}; versioned; workers
+  cannot delete them; kept 1\,year by policy; moved to Infrequent Access after 30\,days. Object lock is used
+  only if the agreed policy requires it, so deletion requests can still be honoured. \\
+Metadata & RDS PostgreSQL (Multi-AZ) $\rightarrow$ Cloud SQL replica & PITR 14\,days, tested backups, async
+  logical replica in GCP (lag typically $<$5\,s). Receipts in both clouds cover the lag (\S\ref{sec:mc}). \\
 \bottomrule
 \end{tabularx}
 \end{table}
 \vspace{-6pt}
-\textbf{Provenance.} Each published stage run stores an immutable record: input-manifest hash, image
-digest, program version, model name/version/SHA-256, framework/CUDA/driver versions, instance type,
-cloud/region, attempt, epoch, timings, exit code and output-manifest hash. The report embeds a
-provenance digest, so a result can be re-run with exactly the same artefacts. Images and model versions
-referenced by retained reports are exempt from registry clean-up.
+\textbf{Provenance.} Each published stage run stores an immutable record: input and output manifest hashes,
+attempt and epoch, image digest, program version, model name/version/SHA-256, framework/CUDA/driver
+versions, GPU model, instance type, region, timings and exit code. The report embeds a provenance digest.
+The same image and model can still differ slightly in floating point across GPU models, so the hardware
+is recorded and pinned when bitwise reproducibility is required. Images and models referenced by retained
+reports are kept for the report's lifetime.
 
 % =====================================================================
 \section{Health and Recovery}
-\textbf{Readiness.} The GPU pod's startup probe passes only after the model is loaded, a CUDA self-test
-succeeds and storage is reachable. A runner claims leases only when ready. The node health is taken from
-the kubelet and the GPU device plugin (Xid errors).
-\textbf{Crashes.} A non-zero exit or OOM is reported as a \emph{program failure}. A lost pod, VM,
-preemption or partition shows up as missing heartbeats (every 30\,s); the reaper expires the lease after
-90\,s, increments the epoch and requeues the stage on another node.
-\textbf{Stalls.} Heartbeats carry progress (child CPU time, bytes written). If progress is unchanged for
-10\,min, or a per-stage deadline of 2$\times$ the historical p99 for the size class is exceeded, the
-attempt is killed and requeued. The agent also \emph{self-fences}: if it cannot renew its lease, it stops
-the program before the lease expires and writes nothing more.
+\textbf{Readiness.} A startup check verifies the model checksum, GPU allocation and a CUDA self-test, free
+scratch space, and that storage and the coordinator are reachable; only then does the runner claim work.
+Node health comes from the kubelet and GPU (Xid) errors.
 
-\textbf{Repeated failures.} Infrastructure failures do not consume the job's retry budget; they lower the
-\emph{node's} health score, and 2 failures from different jobs within 1\,h cordon and replace that node.
-Program failures are retried at most twice with exponential backoff; after an OOM, the retry goes to the
-next memory class. After that the job becomes \texttt{FAILED\_NEEDS\_REVIEW} (poison job): the input is
-kept, the partner and operator are notified, and the queue continues.
+\textbf{Crashes.} A non-zero exit or OOM is reported by the agent. A lost pod, VM, preemption or partition
+appears as missing heartbeats. The reaper locks the row, confirms expiry on the database clock, marks the
+attempt \texttt{ABANDONED} and requeues the stage; the next claim increments the epoch.
 
-\textbf{Logs and metrics.} Structured JSON logs carry \texttt{job\_id, tenant\_id, stage, attempt, epoch,
-node, image digest, model hash}, and an OpenTelemetry trace spans the three stages. Alerts: oldest queued
-age $>$3\,h, lease expiries/h, retry rate, stage p50/p99 by size class, GPU utilisation and memory, VM
-count vs.\ cap, DB replication lag $>$60\,s, egress bytes/day, per-tenant failure rate.
+\textbf{Stalls.} Heartbeats prove only that the agent is alive, not that useful work is happening, so they
+also carry progress: output bytes, program progress where available, and GPU utilisation for stage 2
+(an idle CPU does not mean a GPU kernel has stalled). No progress for 10\,min, or exceeding 2$\times$ the
+historical p99 for the size class and hardware, kills and requeues the attempt. The agent also stops
+itself when it cannot renew, but safety never depends on that (\S\ref{sec:fail}).
+
+\textbf{Repeated failures} are classified:
+(a)~\emph{transient program failures} are retried at most twice with exponential backoff and jitter, and an
+OOM moves to a larger-memory pool;
+(b)~\emph{deterministic input or configuration errors} are not retried and go to the partner with a reason;
+(c)~\emph{infrastructure failures} have a separate budget (5 attempts or 24\,h) and lower the node's health
+score, and 2 failures from different jobs within 1\,h quarantine the node.
+An exhausted budget leaves the job \texttt{FAILED\_NEEDS\_REVIEW}: its data is kept, an alert fires, and the
+queue continues. Cancellation invalidates leases and blocks publication.
+
+\textbf{Logs and metrics.} Structured logs carry \texttt{tenant, job, stage, attempt, epoch, trace ID, image
+digest, model hash} and failure category, never image contents or secrets. Metrics and alerts: oldest
+queue age, stage latency by size and hardware, GPU utilisation and VRAM, lease-expiry and retry rates,
+tenant fairness, object-copy failures, receipt-mirror backlog, replication lag, VM count vs.\ cap, egress
+bytes and stalled finalisation.
 
 % =====================================================================
-\section{Failure Scenario: GPU VM Lost After Writing Its Output}
+\section{Failure Scenario: GPU VM Lost After Writing Its Output}\label{sec:fail}
 \begin{table}[H]\centering\small
 \begin{tabularx}{\linewidth}{@{}p{1.25cm}Y@{}}
 \toprule
 \textbf{Time} & \textbf{Event and state change} \\ \midrule
-$t_0$ & G1 holds the stage-2 lease of job J with \texttt{epoch=7}; it writes \texttt{stage2/attempt-7/} and then \texttt{\_MANIFEST.json}. \\
-$t_1$ & G1 becomes unreachable before \texttt{commit}; its heartbeats stop. Its scoped credentials expire with the lease. \\
-$t_1$+90\,s & The reaper, in one transaction, sets \texttt{epoch=8}, attempt 7 \texttt{ABANDONED}, stage \texttt{QUEUED}.
-  \emph{Optimisation:} if attempt 7's manifest exists and every checksum verifies, the reaper \emph{adopts} it and
-  publishes attempt 7 under \texttt{epoch=8} (saves $\approx$6 GPU-min); otherwise G2 claims the lease. \\
-$t_2$ & G2 writes \texttt{stage2/attempt-8/} and commits:
-  \texttt{UPDATE stage\_runs SET status='SUCCEEDED', published\_attempt=8 WHERE job=J AND stage=2 AND epoch=8 AND status='RUNNING'}
-  $\rightarrow$ 1 row; stage 3 is queued in the same transaction. \\
-$t_3$ & G1 returns and commits with \texttt{epoch=7} $\rightarrow$ 0 rows $\rightarrow$ \texttt{409 STALE\_EPOCH}. The agent discards
-  its work and exits. Kubernetes has already deleted the pod, so the kubelet kills it on reconnect. \\
-$t_3$+24\,h & GC deletes the unpublished \texttt{attempt-7/} prefix. \\
+$t_0$ & G1 has claimed stage 2 of job J: \texttt{epoch=7}, attempt \texttt{A}. It writes \texttt{stage2/attempt-A/}
+  with create-only writes, then a manifest of object versions and SHA-256. Only the coordinator can move
+  the publication pointer. \\
+$t_1$ & G1 becomes unreachable before committing; its heartbeats stop. Its storage credentials may outlive the
+  lease (AWS STS sessions last $\geq$15\,min) but can write only \texttt{attempt-A/}, which nobody reads unless it is
+  published. Credentials are therefore \emph{not} the safety mechanism. \\
+$t_1$+90\,s & The reaper locks the row, confirms expiry on the DB clock, marks \texttt{A} \texttt{ABANDONED} and sets the
+  stage \texttt{QUEUED}; \texttt{epoch} stays 7. A commit from G1 now fails, because the stage is not \texttt{RUNNING}. \\
+$t_2$ & G2 claims the stage (\texttt{epoch=8}, attempt \texttt{B}), writes \texttt{attempt-B/} and commits:
+  \texttt{UPDATE stage\_runs SET status='PUBLISHING', published\_attempt='B' WHERE job=J AND stage=2 AND attempt\_id='B'
+  AND owner='G2' AND epoch=8 AND status='RUNNING' AND lease\_expires\_at > now()} $\rightarrow$ 1 row. Once the publication
+  receipt is mirrored, a second transaction sets \texttt{SUCCEEDED} and queues stage 3. An identical repeated commit
+  returns the same success. \\
+$t_3$ & G1 returns and commits with \texttt{epoch=7}, attempt \texttt{A} $\rightarrow$ 0 rows $\rightarrow$ \texttt{409 STALE\_LEASE}.
+  The agent discards its work and exits. Kubernetes has already deleted the pod, so the kubelet kills it on
+  reconnect. \\
+$t_3$+24\,h & GC confirms that \texttt{A} is unreferenced and deletes \texttt{attempt-A/}. \\
 \bottomrule
 \end{tabularx}
 \end{table}
 \vspace{-6pt}
-\textbf{Why there is no duplicate or conflicting result:} (a)~attempts never share a path, so G1 cannot
-overwrite G2; (b)~exactly one attempt per stage can satisfy the epoch predicate; (c)~consumers follow the
-published pointer only, so an orphan is invisible; (d)~the report pointer and the outbox notification are
-written in the same transaction as \texttt{COMPLETED}, so a stale worker can never trigger a second
-report or e-mail; (e)~the lease clock is the database clock, so G1's clock drift cannot help it.
+\textbf{Why there is no duplicate or conflicting result.}
+(a)~Attempts never share a path, and writes are create-only, so G1 cannot overwrite G2.
+(b)~Exactly one attempt can satisfy the predicate.
+(c)~Consumers follow the published pointer only, so an orphan is invisible.
+(d)~\texttt{COMPLETED} and the outbox event are written in one transaction, and notifications carry a stable ID.
+(e)~Lease time is the database's clock, so drift on G1 cannot help it.
+The guarantee is one \emph{authoritative published result}, not one physical execution. \emph{Considered and
+rejected:} adopting G1's verified orphan would save $\approx$6 GPU-min and is safe with create-only objects,
+but it adds a second publication path, so we rerun instead.
 
 % =====================================================================
-\section{Multi-Cloud Operation}
-\textbf{Strategy: active-active compute, active-passive state (warm standby).} Both clouds run job
+\section{Multi-Cloud Operation}\label{sec:mc}
+\textbf{Strategy: active-active compute, active-passive database writer (warm standby).} Both clouds run job
 services and workers every day, so failover capacity is always warm and tested. The only singleton is
-the database writer (AWS); GCP holds an async replica that can be promoted. A fully active-active
-multi-master DB (e.g.\ CockroachDB) would need $\geq$3 regions for quorum and a third-party dependency,
+the PostgreSQL writer (AWS); GCP's job service writes to it over the VPN, and GCP holds an async replica.
+A multi-master database would need $\geq$3 regions for quorum and a further third-party dependency,
 which is too much for 100 jobs/day.
 
-\textbf{Connectivity and data movement.} An AWS Site-to-Site VPN $\leftrightarrow$ GCP HA VPN link (4 IPsec
-tunnels, BGP, non-overlapping CIDRs) carries control traffic with mTLS on top. Over it go: DB logical
-replication; GCP job-service writes to the primary DB; report and journal copies; and rare GPU spills.
-Bulk inputs never cross. Cross-cloud reads use short-lived presigned URLs, so no long-lived cross-cloud
-IAM trust is needed. \textbf{Egress:} data-local placement cuts cross-cloud bytes from $\approx$9\,TB/month
-($\approx$\$1{,}080) to $\approx$30\,GB/month ($\approx$\$4). A dedicated interconnect is not justified
-at this volume.
+\textbf{Connectivity and egress.} AWS Site-to-Site VPN $\leftrightarrow$ GCP HA VPN (4 tunnels, BGP,
+non-overlapping CIDRs), with TLS to the database and mTLS between services. Cross-cloud traffic consists
+of DB replication, GCP-to-primary writes, receipt and report copies, and rare spills. A copier service
+sends these through the VPN to private storage endpoints. Partners' presigned-URL traffic never crosses
+clouds. Data-local placement cuts cross-cloud bytes from $\approx$9\,TB/month ($\approx$\$1{,}080) to
+$\approx$30\,GB/month ($\approx$\$4), plus spills; a dedicated interconnect is not justified at this volume.
+
+\textbf{Visibility rule (replication safety).} Three small immutable receipts (\emph{acceptance},
+\emph{stage publication} and \emph{completion}) are mirrored to both clouds \emph{before} the matching state
+becomes visible, i.e.\ before the \texttt{202}, before the next stage is queued, and before the partner is
+notified. Each transition is two-step in the database (e.g.\ \texttt{PUBLISHING} $\rightarrow$ \texttt{SUCCEEDED}) with
+the mirror in between, driven by an outbox worker, so a crash between the steps only delays them. Every fact anyone has seen therefore exists outside the primary, even when replication
+lags. The cost is one cross-cloud object write ($<$1\,s) per stage.
 
 \textbf{Dynamic failover (AWS unreachable).}
-(1)~\emph{Detection:} external DNS health checks from several locations, plus GCP probes, fail for 3\,min.
-(2)~\emph{No split-brain:} the AWS coordinator must renew a 60\,s leadership lease in the witness. If it
-cannot, it stops granting leases and accepting writes. GCP waits 2$\times$ that lease before promoting
-Cloud SQL and increments a \emph{control-plane generation}; every request carries the generation, so a
-reconnecting old primary is refused.
-(3)~DNS sends all API traffic to GCP; the GCP coordinator replays both journals, re-creating any accepted
-job lost to replication lag (RPO\,=\,0 for accepted jobs), and extends all running GCP leases by one grace
-period. Workers retry buffered commits with idempotency keys.
-\emph{Keeps operating:} new submissions (homed in GCP), all GCP-homed jobs, status for every job, and
-download of every report. \emph{Paused, not lost:} AWS-homed jobs whose inputs are in S3; they resume
-when AWS returns. Capacity drops to 10 VMs (20 jobs/h on GPU), because the unreachable cloud's VMs might
-still be running and must still count against the cap. RTO $\approx$5\,min.
-\textbf{Failback:} the old AWS database is rebuilt as a replica of GCP, then switched back in a quiet
-window. A GCP outage is simpler: AWS stays primary and only GCP-homed jobs pause.
+(1)~\emph{Detect and route:} DNS health checks from several locations and GCP probes fail for 3\,min, and
+DNS sends all API traffic to GCP. Status (labelled ``last known'') and report downloads, which rely on
+mirrored receipts, continue immediately.
+(2)~\emph{Fence the old writer:} the AWS job services renew a 60\,s \emph{writer lease} (generation $g$)
+in the witness. Every job service, in either cloud, opens a write transaction only while that lease has
+$\geq$15\,s left, and statements time out after 5\,s, so after expiry plus a clock-skew margin nothing can still be writing to
+the old primary. Each renewal also records the receipt-mirror backlog.
+(3)~\emph{Promote only when safe:} if the lease has expired \emph{and} its last renewal reported backlog\,=\,0, GCP
+promotes Cloud SQL as generation $g{+}1$ and reconciles from receipts. Missing accepted jobs are
+re-created, and missing publications are restored with the \emph{same} attempt IDs, so no stage is ever
+re-published differently. Unreceipted in-flight work was never visible and is simply rerun. Otherwise
+(backlog $>$0, or the witness is down) the system stays read-only until an operator decides; fencing is
+never bypassed.
+
+\emph{Keeps operating:} new submissions (homed in GCP), GCP-homed jobs, status, and every report.
+\emph{Paused, not lost:} AWS-homed jobs whose inputs are in S3.
+Capacity drops to 10 VMs (20 GPU jobs/h), because the unreachable VMs still count against the cap.
+Targets: read RTO $\approx$3\,min, write RTO $\approx$5\,min when the gate passes, RPO\,=\,0 for visible results.
+\textbf{GCP outage:} AWS stays primary in degraded mode. It accepts and publishes with local receipts and a
+non-zero backlog, which blocks automatic promotion until GCP returns and the backlog drains. GCP-homed jobs
+pause. \textbf{Link-only partition} (both clouds healthy): AWS still renews the lease, so nothing is promoted;
+GCP serves reads, and its runners finish current attempts but cannot publish until the link returns.
+\textbf{Failback:} the old primary is rebuilt as a replica and switched over in a quiet window. Requests
+carrying generation $g$ are refused.
 
 % =====================================================================
-\section{Cloud Security}\label{sec:sec}
-\textbf{Users.} Partners sign in through OIDC with MFA (their own IdP federated, or our user pool) and
-receive 1\,h JWTs carrying \texttt{tenant\_id} and a role (submitter/viewer/admin). Automation uses OAuth
-client credentials per partner.
+\section{Cloud Security}
+\textbf{Users.} Partners sign in through OIDC with MFA; the JWT's issuer, audience, signature and expiry are
+validated, and the tenant is mapped server-side. Automation uses scoped OAuth client credentials.
 \textbf{Services.} Workloads use workload identity (EKS Pod Identity, GKE Workload Identity), so no
-static cloud keys exist anywhere. Service-to-service calls use mTLS with SPIFFE-style identities, and
-the few cross-cloud API calls use workload-identity federation.
+static cloud keys exist. Internal APIs use mTLS, and database connections use TLS.
 
 \textbf{Access control (defence in depth).}
-(1)~The API derives the tenant from the token, never from the request body.
-(2)~PostgreSQL row-level security on \texttt{tenant\_id} (\texttt{SET app.tenant\_id} per transaction).
-(3)~One bucket and one KMS key per tenant per cloud.
-(4)~Per-lease credentials minted via STS session policies / GCP credential access boundaries: read
-\texttt{input/} and the published predecessor, write only this attempt's prefix, TTL\,=\,lease.
+(1)~The tenant comes from the token, never from the request body, and ownership is checked on every call.
+(2)~PostgreSQL row-level security: \texttt{SET LOCAL app.tenant\_id} in each transaction, application roles
+that are not table owners and lack \texttt{BYPASSRLS}, and a separate restricted role for the scheduler.
+(3)~One bucket and one KMS key per tenant per cloud; both report copies and receipts are protected by the
+same tenant checks.
+(4)~Runners get only the exact input and model reads and attempt-prefix writes they need. Because STS
+sessions last at least 15\,min, the coordinator's lease, not the credential, is the authority.
 (5)~Presigned URLs are per object and short-lived.
-Deleting a tenant's key crypto-shreds its data when the partnership ends.
+Retiring a tenant's key crypto-shreds its data once retention and backup obligations are reconciled.
 
-\textbf{Secrets.} Secrets live in AWS Secrets Manager / GCP Secret Manager, read at run time through
-workload identity and rotated every 30\,days. DB access uses IAM authentication. Secret scanning runs in
-CI; images contain no secrets.
-\textbf{Network isolation.} Workers sit in private subnets without public IPs and reach storage through
-private endpoints (S3 gateway endpoint, Private Google Access). Databases have no public endpoint. The
-API sits behind a WAF and rate limits, and admission control (Kyverno / Binary Authorization) admits
-only signed images.
-\textbf{Encryption.} TLS 1.2+ externally, mTLS internally, and IPsec between clouds (two layers). At rest:
-SSE-KMS/CMEK with per-tenant keys for objects, KMS-encrypted DB, disks and backups. Audit trail:
-CloudTrail data events, GCS data-access logs, and DB audit of all state transitions.
+\textbf{Secrets.} Secrets live in AWS Secrets Manager / GCP Secret Manager, are read at run time through
+workload identity and are rotated; databases use IAM authentication. CI runs secret scanning.
+\textbf{Network isolation.} Workers and databases are private (no public IPs) and use private storage
+endpoints. The API sits behind a WAF and rate limits, and admission control (Kyverno / Binary
+Authorization) admits only signed images.
+\textbf{Encryption.} TLS 1.2+ externally, mTLS internally, and IPsec between clouds. At rest: SSE-KMS/CMEK
+with per-tenant keys, and KMS-encrypted databases, disks and backups. Audit trail: CloudTrail data events,
+GCS data-access logs, and DB audit of every state transition.
 
 % =====================================================================
 \section{Trade-offs and Limitations}
-Async DB replication trades a few seconds of metadata RPO for write latency (the journal compensates).
-Not replicating inputs saves $\approx$\$1k/month but pauses home-cloud jobs during an outage. Scale-to-zero
-GPUs save $\approx$\$2.7k/month for a $\approx$5\,min cold start. The witness and DNS are third-party
-dependencies: if both fail, failover becomes a manual, operator-approved promotion.
+\textbf{Safety over availability:} in an ambiguous partition the system may stay read-only rather than risk two
+writers. \textbf{Receipts} add $<$1\,s per stage in exchange for RPO\,=\,0 on visible results. \textbf{Inputs are
+not replicated}: this saves $\approx$\$1k/month but pauses home-cloud jobs during an outage.
+\textbf{Scale-to-zero GPUs} save $\approx$\$2.7k/month for a $\approx$5\,min cold start. \textbf{Third-party
+witness and DNS:} if either fails, failover falls back to an operator decision.
 
 \end{document}

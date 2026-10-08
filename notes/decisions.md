@@ -80,37 +80,49 @@ Status legend: `PROPOSED` (recommended, awaiting decision) ·
 
 ## D6. Result commit protocol (core of the failure scenario) — `PROPOSED`
 
-1. Every attempt writes only to its own immutable prefix
-   `jobs/{id}/stage{n}/attempt-{k}/`, with `_MANIFEST.json` (file list +
-   SHA-256) written **last**.
-2. Every lease carries a monotonically increasing **fencing epoch**. When a lease expires,
-   the coordinator increments the epoch before reassigning the stage.
-3. Publishing is a conditional update:
-   `UPDATE stage SET status='SUCCEEDED', output=attempt-k WHERE job=… AND stage=n AND epoch=:e AND status='RUNNING'`.
-   Only the holder of the current epoch can succeed. Downstream stages read
-   **only** the published pointer and never list a prefix.
-4. A stale worker that comes back gets `409 stale epoch`. It stops and its prefix
-   is garbage-collected.
+1. Every attempt writes only to its own prefix `jobs/{id}/stage{n}/attempt-{uuid}/` with
+   **create-only** writes (S3 `If-None-Match`, GCS `ifGenerationMatch=0`); `_MANIFEST.json`
+   (object versions + SHA-256) is written **last**.
+2. The epoch is incremented **only when a lease is claimed** (with a new attempt UUID).
+   The reaper does not change it: it marks the expired attempt `ABANDONED` and requeues.
+3. Publishing is a conditional update that checks job, stage, attempt UUID, owner, epoch,
+   `status='RUNNING'`, not cancelled, and `lease_expires_at > now()` (DB clock). It sets
+   `PUBLISHING`; once the publication receipt is mirrored to both clouds, a second
+   transaction sets `SUCCEEDED` and queues the next stage. Downstream reads only the
+   published manifest.
+4. A stale worker that comes back gets `409 STALE_LEASE`; its prefix is GC'd after 24 h.
+5. Storage credentials are **not** the fence: AWS STS sessions last ≥ 15 min, longer than
+   the 90 s lease. They are scoped to the attempt prefix, which is never read unless published.
+- **v2 change:** v1 incremented the epoch in both the reaper and the claim (inconsistent)
+  and claimed credentials expire with the lease (wrong).
 - **Decision:**
 
-## D7. Adopt a completed orphan attempt instead of recomputing? — `PROPOSED (optional)`
+## D7. Adopt a completed orphan attempt instead of recomputing? — `REJECTED in v2`
 
 - When a lease expires, the coordinator first checks whether the expired attempt has a
   complete `_MANIFEST.json` whose checksums verify. If so, it publishes *that* attempt (and bumps the epoch
   so the original VM's late commit is still rejected) and skips the rerun.
 - **Gain:** saves about 6 GPU-min per incident, and GPU is the bottleneck.
-- **Cost:** extra code path. It is only safe because objects are immutable and the
+- **Cost:** extra code path. It is only safe because objects are create-only and the
   manifest is written last.
+- **v2:** rejected to keep a single publication path; mentioned as "considered" in §7.
 - **Decision:**
 
-## D8. "Accepted jobs are never silently lost" — `PROPOSED`
+## D8. Visibility rule: receipts in both clouds — `PROPOSED (v2)`
 
-- A job is ACKed (HTTP 202 + job ID) only after: (a) the upload is complete and checksum-verified,
-  (b) the DB row is committed, and (c) a small acceptance-journal record is written to **both**
-  clouds' object storage. If the AWS DB is lost before the row replicates, the
-  promoted GCP DB rebuilds missing jobs from the journal.
-- Workers buffer stage-completion reports locally and retry with idempotency keys,
-  so completions survive control-plane failover.
+- Three immutable receipts (**acceptance**, **stage publication**, **completion**) are
+  mirrored to both clouds *before* the state becomes visible: before the 202, before the
+  next stage is queued, before the partner is notified. Each transition is two-step in the
+  DB (e.g. `PUBLISHING → SUCCEEDED`), driven by an outbox worker.
+- Promotion of the GCP replica is allowed only when (a) the witness writer lease has
+  expired (old writer fenced) **and** (b) its last renewal reported receipt backlog = 0.
+  GCP then reconciles from receipts with the same attempt IDs, so a visible result is never
+  re-published differently. Otherwise: read-only until an operator decides.
+- GCP outage: AWS continues in degraded mode with local receipts; the non-zero backlog
+  blocks automatic promotion until GCP returns and drains it.
+- **v2 change:** v1 claimed automatic failover with RTO 5 min and RPO 0 although only
+  acceptances were journaled; a stale replica could have re-run and re-published a stage
+  differently.
 - **Decision:**
 
 ## D9. Tenant isolation — `PROPOSED`

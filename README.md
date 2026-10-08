@@ -6,7 +6,7 @@ Due **Fri 9 Oct 2026 23:55**. Design only, no implementation.
 
 > Keep this repository **private** until after the deadline (grading is rank-based).
 
-**Status:** draft v1 (4 pages), still to be revised. See `notes/decisions.md`.
+**Status:** draft v2 (5 pages; about 40% of page 5 free for my own additions). See `notes/decisions.md`.
 
 ## Layout
 

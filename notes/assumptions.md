@@ -33,9 +33,9 @@ Clouds used throughout: **AWS (primary DB) + GCP**, both in Sydney
 ### 1.1 GPU is the bottleneck
 
 - GPU throughput = 4 GPUs × (60 / 6 min) = **40 jobs/hour**.
-- Burst of 100 jobs → GPU backlog clears after 100 / 40 = **2.5 h**. The last
-  submission waits about 1.5 h. In the worst case (all 30-min jobs, about 12 GPU-min each)
-  throughput is 20 jobs/h, so the backlog takes **5 h** to clear.
+- Burst of 100 jobs → at least **2.5 h** of GPU service (100 / 40), plus pipeline fill and
+  cold start; about 60 jobs still wait at the end of the burst hour. (v1 also claimed a
+  5 h worst case; dropped in v2, because a 30-min job does not tell us its GPU share.)
 - → **Durable queue with visible queue position/ETA**. Acceptance never blocks
   on capacity.
 - Daily GPU demand = 100 × 6 min = 10 GPU-hours out of 96 available, so utilisation is about **10%**.
@@ -43,23 +43,23 @@ Clouds used throughout: **AWS (primary DB) + GCP**, both in Sydney
 
 ### 1.2 CPU sizing at burst
 
-- Prep can run ahead of the GPU: 100 × 5 min = 500 VM-min/h → **~9 CPU VMs**.
-- Report generation can only go as fast as the GPU: 40 × 4 min = 160 VM-min/h → **~3 CPU VMs**.
-- Peak CPU need is about **12 VMs**, inside the 16-CPU-VM budget, which leaves headroom for retries.
+- Prep can run ahead of the GPU: 100 × 5 min = 500 VM-min/h → **~8.3 CPU VMs**.
+- Report generation can only go as fast as the GPU: 40 × 4 min = 160 VM-min/h → **~2.7 CPU VMs**.
+- Peak CPU need is about **11 VMs**, inside the 14-CPU-worker budget, if placement is balanced.
 
 ### 1.3 VM budget (hard cap: 20 VMs, ≤ 4 GPU)
 
 | Pool | AWS | GCP | Total |
 |---|---|---|---|
+| K8s system node (on-demand) | 1 | 1 | 2 |
 | GPU workers (min–max) | 0–2 | 0–2 | ≤ 4 |
-| CPU workers (min–max) | 1–8 | 1–8 | ≤ 16 |
+| CPU workers (min–max) | 0–7 | 0–7 | ≤ 14 |
 | **Static per-cloud cap** | **10** | **10** | **20** |
 
-- **Assumption:** the 20-VM limit covers *worker* VMs only. The control plane
-  (API, coordinator, DB, queue, object storage, managed Kubernetes control plane)
-  runs on managed/serverless services. **Fallback if the marker counts them:**
-  give 2 VMs (one per cloud) to the control plane. That leaves 18 workers, still above the
-  ~12 + 4 GPU peak need.
+- **Assumption:** the 20-VM limit covers VMs we provision (system + worker nodes). Managed
+  services (RDS/Cloud SQL, EKS/GKE masters, Fargate/Cloud Run, object storage) are outside it.
+  KEDA, CoreDNS and node agents need somewhere to run, hence 1 system node per cloud (v2).
+- The cap must also hold during upgrades: surge disabled (EKS `MINIMAL` updates, GKE zero-surge).
 - **Per-cloud static cap** instead of a dynamic global cap. If one cloud is unreachable we
   cannot prove its VMs are gone, so we must assume they still count against
   the limit. The surviving cloud therefore keeps its own 10 and does **not** borrow. In degraded mode the GPU
@@ -80,7 +80,7 @@ Clouds used throughout: **AWS (primary DB) + GCP**, both in Sydney
 |---|---|---|
 | Partner → object storage | aggregate burst 100 × 3 GB / 1 h = 300 GB/h ≈ **670 Mbps**; per partner ≥ 100 Mbps → 3 GB in about 4 min | **Direct multipart upload with presigned URLs** (resumable, per-part checksums). The API never carries file bytes |
 | VM ↔ object storage (same cloud) | ≥ 5 Gbps | 3 GB in about 5–10 s, negligible next to compute |
-| AWS ↔ GCP | GCP HA VPN ↔ 2 AWS Site-to-Site VPN connections = 4 IPsec tunnels × ~1.25 Gbps (AWS per-tunnel limit); plan on ≈ 2.5 Gbps usable; same-metro RTT < 5 ms | Enough for metadata, reports and occasional spill. A dedicated interconnect is not justified at < 10 TB/month |
+| AWS ↔ GCP | GCP HA VPN ↔ 2 AWS Site-to-Site VPN connections = 4 IPsec tunnels × ~1.25 Gbps (AWS per-tunnel limit). A single flow cannot exceed one tunnel, so plan on **1 Gbps effective** (to be measured); same-metro RTT < 5 ms | Enough for metadata, reports and occasional spill. A dedicated interconnect is not justified at < 10 TB/month |
 | Metadata DB replication | KB/s | negligible |
 
 ---
@@ -132,7 +132,7 @@ inputs are small, so report generation can run in either cloud.
 | Intermediates | same bucket, `jobs/{id}/stage{n}/attempt-{k}/` | delete 7 days after job is terminal; orphan attempts are GC'd after 24 h | immutable once written |
 | Reports | per-tenant bucket, **replicated to both clouds** | Standard → Infrequent at 30 days; keep 1 year `[CONFIRM]` | versioning + object lock (WORM); cross-cloud copy |
 | Job metadata | PostgreSQL (AWS RDS primary, GCP Cloud SQL async replica) | PITR 14 days | Multi-AZ + cross-cloud replica + daily snapshot |
-| Acceptance journal | small JSON record written to **both** clouds' buckets before the ACK | kept with the job | lets us rebuild DB rows lost to async-replication lag |
+| Receipts (acceptance / publication / completion) | small JSON records mirrored to **both** clouds before the state becomes visible | kept with the job | let a promoted replica reconcile lost transitions without re-publishing differently |
 | Logs / metrics | each cloud's native stack + central copy | 30 d hot, 1 y archive | |
 
 Steady-state input storage: 9 TB × $0.025 ≈ **$225/mo**. Everything else is negligible.
