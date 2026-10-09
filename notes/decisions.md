@@ -1,156 +1,89 @@
-# Design Decision Log
+# Design Decision Log (final)
 
-One entry per key choice: options, recommendation, trade-off. The
-**Decision** line is yours to fill in. Write *why* in your own words, because
-these become the "justify key choices and trade-offs" sentences in the report.
-
-Status legend: `PROPOSED` (recommended, awaiting decision) ·
-`ACCEPTED` · `REJECTED`.
+Each entry records the final choice, the main alternative, and why. The report's §10 table is the
+condensed version. "History" notes how the design changed between drafts.
 
 ---
 
-## D1. Which two clouds — `PROPOSED`
+## D1. Clouds and regions — AWS + GCP, both in Sydney
+- **Why:** both offer managed Kubernetes with GPU node pools, HA VPN to each other and workload
+  identity. Sydney is the only Australian region where both offer the same GPU (T4); GCP Melbourne
+  has no GPUs. Same metro keeps inter-cloud RTT low enough for synchronous replication, and data
+  stays in Australia (camera traps also photograph people).
+- **Alternative:** Sydney + Melbourne (more geographic independence, but no GCP GPUs and higher RTT).
 
-- **Options:** AWS + GCP · AWS + Azure · GCP + Azure
-- **Recommendation:** AWS + GCP. Both have managed Kubernetes with GPU
-  node pools (EKS / GKE), HA VPN to each other, workload-identity federation in both
-  directions, and good GPU supply in Sydney.
-- **Trade-off:** Azure would fit better if the university already uses Entra ID.
-  Partner login is federated OIDC anyway, so this barely matters.
-- **Decision:**
+## D2. Multi-cloud strategy — active-active compute, quorum-governed state
+- Both clouds run job services and workers daily; one PostgreSQL leader at a time, elected by a
+  three-voter etcd quorum (AWS, GCP, third-site witness).
+- **Alternative:** async replica with operator-run promotion (no automatic write failover); multi-master
+  DB (needs ≥ 3 data regions, too heavy for 100 jobs/day).
 
-## D2. Multi-cloud strategy — `PROPOSED`
+## D3. Job store and queue — PostgreSQL (`SELECT … FOR UPDATE SKIP LOCKED`)
+- One transaction covers state, queue and leases, so no dual-write. Load is < 1 write/s.
+- **Alternative:** SQS / Pub/Sub plus a database.
 
-- **Options:**
-  1. Active-passive for everything (GCP idle until failover)
-  2. **Compute active-active, control plane active-passive**
-  3. Fully active-active (multi-master DB such as CockroachDB/Spanner)
-- **Recommendation:** (2). Both clouds run the stateless job service and workers
-  every day, so failover capacity is always warm and tested. The only singleton is the
-  metadata DB writer (AWS); GCP's job service writes to it over the VPN, and GCP holds an
-  async replica that is promoted on failure (gated by a third-party witness to prevent
-  split-brain).
-- **Trade-off:** (3) needs ≥ 3 regions for quorum and adds a third-party
-  dependency. That is overkill at 100 jobs/day. The cost of (2) is an RPO of a few seconds for
-  metadata, which is covered by the dual-written acceptance journal (D8) and idempotent
-  worker re-reporting.
-- **Decision:**
+## D4. Work assignment — pull-based fenced leases
+- Runners request leases with their capabilities; the epoch increments only on a claim; 90 s lease,
+  renewed every 30 s. Discovery and load balancing come for free.
+- **Alternative:** push behind an L4 load balancer. SmartPark (A1) showed why not: L4 balances per
+  connection, and after scale-out the new pod got 3 m CPU vs 994 m on the old one.
 
-## D3. Queue technology — `PROPOSED`
+## D5. Orchestration — EKS + GKE, KEDA ScaledJobs, single-use pods
+- One pod per attempt (fresh filesystem per tenant job), KEDA `accurate` strategy, GPU taints,
+  required anti-affinity (one attempt per worker VM).
+- **Alternative:** CPU-based HPA (A1); CPU cannot see a GPU backlog.
 
-- **Options:** SQS / Pub/Sub · RabbitMQ/Kafka · **PostgreSQL as the queue**
-  (`SELECT … FOR UPDATE SKIP LOCKED`)
-- **Recommendation:** Postgres. Job state, leases and the queue sit in one
-  transactional store, so there is no dual-write between a queue and a DB (the classic source of
-  lost or duplicated jobs). Load is tiny (< 1 operation/s).
-- **Trade-off:** it is not a "cloud-native" queue, and the DB becomes the critical
-  component. Accepted because the DB is already replicated (D2) and SQS would not
-  remove that dependency anyway (state still lives in the DB).
-- **Decision:**
+## D6. Result commit protocol (failure scenario)
+- Create-only attempt prefixes (S3 `If-None-Match`, GCS `ifGenerationMatch=0`), manifest written
+  last; conditional `UPDATE` checking job, stage, attempt, owner, epoch, `RUNNING` and
+  `lease_expires_at > clock_timestamp()`; next stage queued in the same transaction.
+- Storage credentials are not the fence (STS sessions last ≥ 15 min).
+- **History:** v1 incremented the epoch in both reaper and claim and assumed credentials expired with
+  the lease; both corrected.
 
-## D4. Work assignment: pull vs push — `PROPOSED`
+## D7. Orphan adoption — rejected
+- Adopting a verified orphan saves ≈ 6 GPU-min but adds a second publication path. Rerun instead.
 
-- **Recommendation:** **pull with leases.** An agent on each worker node polls
-  the coordinator API with its capabilities (`cloud`, `gpu`, `mem`, `free slots`)
-  and receives a lease `(job, stage, attempt, epoch, ttl)`. Worker discovery
-  falls out of this for free: a worker exists only while it holds or
-  asks for leases.
-- **Placement score:** must match resources (GPU stage → GPU pool) → prefer data-local
-  cloud → least-loaded node. GPU spill to the other cloud happens only when the home
-  queue's estimated wait is greater than transfer time + a threshold (assumptions §3.1).
-- **Trade-off:** polling adds up to a few seconds of latency, which is irrelevant against
-  5–30-minute stages. Push would need a registry of workers plus failure detection, which
-  pull already gives us.
-- **Decision:**
+## D8. Metadata HA — Patroni, synchronous standby, 3-voter etcd
+- `synchronous_commit=on`; only members in `/sync` can be promoted; a member leaves `/sync` (quorum
+  write) before the leader stops waiting for it; leader key TTL 30 s + watchdog; clients never cancel
+  `COMMIT`.
+- Result: automatic failover ≈ 30–60 s, RPO = 0 for acknowledged commits.
+- **Cost:** self-managed database, a few ms per commit, third-site witness dependency.
+- **History:** v2 used receipts + a backlog flag (holes: stale backlog report, timeouts are not
+  fencing, admission conflict after takeover); a gated manual runbook was safe but had no automatic
+  write failover. Quorum + synchronous replication fixes both.
 
-## D5. Orchestration — `PROPOSED`
+## D9. Tenant isolation
+- Tenant from the token, ownership checks, PostgreSQL RLS (`SET LOCAL`, non-owner roles without
+  `BYPASSRLS`), one bucket and KMS key per tenant per cloud, per-lease scoped credentials,
+  short-lived presigned URLs.
 
-- **Options:** plain VMs + Docker + systemd agent · **managed K8s per cloud
-  (EKS + GKE)** · Nomad multi-region
-- **Final toolchain:** plain YAML manifests + `kubectl apply` from CI (digest-pinned),
-  scheduled `kubectl diff` for drift; Helm + Argo CD rejected as extra controllers for 2 clusters.
-- **Recommendation:** EKS + GKE. Use node pools with taints (GPU pool only runs
-  the identify stage), cluster autoscaler with hard `max` per pool (enforces the VM
-  cap), NetworkPolicies, and workload identity. KEDA **ScaledJobs** create one
-  **single-use runner pod per queued lease**: the pod claims one lease, runs one attempt,
-  exits. Every tenant job therefore gets a fresh filesystem. API + coordinator are one
-  stateless "job service" (Fargate / Cloud Run). It is the *cross-cloud* scheduler, and K8s
-  only runs pods within one cloud.
-- **Trade-off:** running two clusters is operationally heavy for a small team.
-  Plain VMs are simpler but would need hand-built isolation, scaling and health checks.
-- **Decision:**
+## D10. Repeated failures
+- Transient program failures: ≤ 2 retries with backoff + jitter (OOM → larger pool). Deterministic
+  input errors: not retried. Infrastructure failures: separate budget (5 attempts or 24 h), node
+  quarantine after cross-job failures. Budgets are initial defaults, tuned by fault injection.
 
-## D6. Result commit protocol (core of the failure scenario) — `PROPOSED`
+## D11. Capacity
+- **VM split 10 + 10** (2 GPU each) rather than 20 in one cloud: two-provider compute, warm capacity
+  survives a cloud loss, only 2 T4s needed per region, data stays local.
+- **After losing a cloud:** keep 10 until the other cloud's VMs are confirmed terminated, then CI
+  raises limits up to 20 VMs / 4 GPUs.
+- **Job service ≥ 2 tasks:** a single restart could outlast the 90 s lease and void in-flight GPU work;
+  ≈ $40–45/month.
 
-1. Every attempt writes only to its own prefix `jobs/{id}/stage{n}/attempt-{uuid}/` with
-   **create-only** writes (S3 `If-None-Match`, GCS `ifGenerationMatch=0`); `_MANIFEST.json`
-   (object versions + SHA-256) is written **last**.
-2. The epoch is incremented **only when a lease is claimed** (with a new attempt UUID).
-   The reaper does not change it: it marks the expired attempt `ABANDONED` and requeues.
-3. Publishing is a conditional update that checks job, stage, attempt UUID, owner, epoch,
-   `status='RUNNING'`, not cancelled, and `lease_expires_at > now()` (DB clock). It sets
-   `PUBLISHING`; once the publication receipt is mirrored to both clouds, a second
-   transaction sets `SUCCEEDED` and queues the next stage. Downstream reads only the
-   published manifest.
-4. A stale worker that comes back gets `409 STALE_LEASE`; its prefix is GC'd after 24 h.
-5. Storage credentials are **not** the fence: AWS STS sessions last ≥ 15 min, longer than
-   the 90 s lease. They are scoped to the attempt prefix, which is never read unless published.
-- **v2 change:** v1 incremented the epoch in both the reaper and the claim (inconsistent)
-  and claimed credentials expire with the lease (wrong).
-- **Decision:**
+## D12. Deployment and provisioning
+- Terraform for both clouds, run from CI (plan on PR, apply after review); A1 used a one-off
+  `gcloud container clusters create`.
+- Plain YAML + `kubectl apply` from CI with signed image digests, scheduled `kubectl diff` for drift;
+  Helm + Argo CD rejected as extra controllers for two clusters.
+- Model weights fetched by an init container, pinned by version and SHA-256 (A1 pulled the latest
+  object without a checksum).
+- Provider-managed front ends (ALB, Cloud Run) instead of a self-configured GCE Ingress (A1's never
+  became healthy).
 
-## D7. Adopt a completed orphan attempt instead of recomputing? — `REJECTED in v2`
-
-- When a lease expires, the coordinator first checks whether the expired attempt has a
-  complete `_MANIFEST.json` whose checksums verify. If so, it publishes *that* attempt (and bumps the epoch
-  so the original VM's late commit is still rejected) and skips the rerun.
-- **Gain:** saves about 6 GPU-min per incident, and GPU is the bottleneck.
-- **Cost:** extra code path. It is only safe because objects are create-only and the
-  manifest is written last.
-- **v2:** rejected to keep a single publication path; mentioned as "considered" in §7.
-- **Decision:**
-
-## D8. Metadata HA: Patroni + synchronous standby + 3-voter etcd — `ACCEPTED (final)`
-
-- One PostgreSQL node per cloud on the system/state node, managed by Patroni; leader (AWS) +
-  synchronous standby (GCP), `synchronous_commit=on`; same-metro RTT < 5 ms.
-- etcd quorum of three voters: AWS, GCP, and a third-site witness (leader keys only, no job data,
-  no processing).
-- Safety: an isolated leader cannot acknowledge commits (standby unreachable) and cannot switch to
-  async (needs a quorum write to `/sync`); leader key TTL 30 s + watchdog. Only members listed in
-  `/sync` can be promoted, and a member is removed by quorum before the leader stops waiting for it.
-- Result: automatic failover in ~30–60 s, RPO = 0 for acknowledged commits, explicit degraded mode.
-- Cost: self-managed DB instead of RDS/Cloud SQL, a few ms per commit, third-site dependency.
-  Fallback if a third site is not allowed: async replica + operator-run gated promotion.
-- History: v2 receipt/backlog protocol had holes (stale backlog, timeouts are not fencing,
-  post-takeover admission conflict); the gated-runbook version was correct but gave no automatic
-  write failover. Quorum + sync replication fixes both.
-
-## D9. Tenant isolation — `PROPOSED`
-
-- **Options:** shared bucket + prefix ACLs · **bucket per tenant per cloud +
-  KMS key per tenant**
-- **Recommendation:** bucket + key per tenant. With few partners (assume ≤ 20) it is
-  cheap. IAM policy is simple. Deleting a tenant's key crypto-shreds its data at offboarding.
-  The DB uses `tenant_id` on every row + PostgreSQL row-level security, keyed
-  on the authenticated token's tenant claim.
-- **Worker credentials:** short-lived, scoped down to one job's prefixes
-  (read input prefix, write own attempt prefix). They are issued per lease through workload identity.
-- **Decision:**
-
-## D10. Repeated-failure policy — `PROPOSED`
-
-- Infrastructure failure (lease expiry, VM lost, preemption) → retry immediately on a
-  different node. It does **not** count against the job's attempt budget, but it counts
-  against the *node's* health score (node cordoned after 2 failures from different jobs within 1 h).
-- Program failure (non-zero exit, OOM) → retry ≤ 2 more times with backoff, on a
-  larger VM if the failure was OOM. After that → `FAILED_NEEDS_REVIEW` (poison job). Input is
-  retained, the partner and operator are notified, and the queue keeps going.
-- **Decision:**
-
-## D11. Report tooling — `PROPOSED`
-
-- LaTeX (`report/main.tex`, Overleaf-compatible) for tight control of the 5-page
-  limit. Diagram as vector PDF/SVG (draw.io, or the Python `diagrams` package for
-  real cloud icons).
-- **Decision:**
+## D13. Caching
+- No application result cache: batches are unique, status reads are cheap, and a second store would
+  break the single source of truth. Idempotency keys and stored reports cover repeats; only
+  infrastructure caches remain (model, image layers, IdP JWKS). A1 used a per-pod in-memory cache
+  (TTL 60 s, key = user uuid + number of car parks) because it served repeated real-time queries.

@@ -17,3 +17,5 @@
 # Python (diagram scripts)
 __pycache__/
 .venv/
+*.lof
+*.lot
