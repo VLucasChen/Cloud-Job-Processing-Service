@@ -6,7 +6,7 @@ Due **Fri 9 Oct 2026 23:55**. Design only, no implementation.
 
 > Keep this repository **private** until after the deadline (grading is rank-based).
 
-**Status:** final (5 content pages + cover, contents, references). Quorum-governed synchronous metadata (Patroni + etcd), plain YAML/kubectl deployment. Fill in `\studentid` in `report/main.tex` before submitting.
+**Status:** final (5 content pages + cover, contents, references). Facts checked in `notes/verification.md`.
 
 ## Layout
 
@@ -16,6 +16,7 @@ Due **Fri 9 Oct 2026 23:55**. Design only, no implementation.
 | `diagrams/architecture.tex` → `.pdf` | Architecture diagram (TikZ, vector) |
 | `notes/assumptions.md` | Sizing calculations and stated assumptions (bandwidth, pricing, egress, storage tiers, third parties) |
 | `notes/decisions.md` | Design decision log: options, recommendation, trade-off, and my decision |
+| `notes/verification.md` | Source and status for every external fact and price used |
 
 ## Build
 

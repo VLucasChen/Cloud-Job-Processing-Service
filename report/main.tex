@@ -26,7 +26,7 @@
 \definecolor{accent}{HTML}{1A5FC8}
 
 % ---- fill in before submitting -------------------------------------
-\newcommand*{\studentid}{}   % e.g. 12345678
+\newcommand*{\studentid}{35860537}
 % ---------------------------------------------------------------------
 
 \begin{document}
@@ -92,12 +92,12 @@ create-only per-attempt objects, and a conditional update publishes exactly one 
 three-voter quorum (AWS, GCP, third-site witness) decides which database may accept writes. Two sites
 alone cannot tell a dead peer from a broken link; a third voter can~\cite{gilbert-lynch,etcd-faq}.
 
-\begin{table}[H]\centering\small
-\begin{tabularx}{\linewidth}{@{}L{2.9cm}Y@{}}
+\begin{table}[H]\centering\footnotesize
+\begin{tabularx}{\linewidth}{@{}L{2.6cm}Y@{}}
 \toprule
 \textbf{Assumption} & \textbf{Value and consequence} \\ \midrule
 Workload & 100 jobs/day; burst 100/h; mean batch 3\,GB ($\approx$1{,}000 JPEGs); mean job 15\,min split
-  5/6/4\,min (prep/ID/report); prep output $\approx$5--10\% of input; report $\approx$10\,MB. Sizing
+  5/6/4\,min (prep/ID/report); prep output $\approx$5--10\% of input; report $\approx$10\,MB; the model fits a 16\,GB T4. Sizing
   hypotheses, to be benchmarked on each VM type. \\
 GPU is the bottleneck & 4 GPUs $\times$ 60/6 = \textbf{40 jobs/h}. A 100-job burst needs $\geq$\textbf{2.5\,h} of
   GPU service plus pipeline fill and cold start; $\approx$60 jobs still wait at the end of the burst hour
@@ -109,16 +109,20 @@ VM cap & Per cloud: 1 on-demand \emph{system/state} node (KEDA, CoreDNS, Postgre
   + 0--7 CPU + 0--2 GPU = 10, so \textbf{2 + 14 + 4 = 20}. Managed services (EKS/GKE masters,
   Fargate/Cloud Run, object storage) are outside the cap. \\
 Network & Partner $\rightarrow$ storage burst 300\,GB/h $\approx$ 670\,Mbps (1.1\,Gbps if every batch is
-  5\,GB): uploads go directly to storage. AWS$\leftrightarrow$GCP: 4 IPsec tunnels, one flow capped at
-  $\approx$1.25\,Gbps~\cite{aws-vpn-quotas}; plan on 1\,Gbps effective. Same-metro RTT $<$5\,ms, so a
-  synchronous commit costs only a few ms. \\
-Pricing (planning figures, not quotes) & Egress \$0.12--0.19/GB by provider and path~\cite{gcs-pricing,aws-pricing};
-  GPU VM $\approx$\$1.2/h; object storage $\approx$\$0.025/GB-month. Always-on 4 GPUs $\approx$\$3.5k/month vs.\
-  on demand ($\approx$10 GPU-h/day + 1 warm GPU in business hours) $\approx$\$0.8k/month, for a
-  $\approx$5\,min cold start (to be measured). \\
+  5\,GB): uploads go directly to storage. AWS$\leftrightarrow$GCP: 4 IPsec tunnels~\cite{gcp-havpn}, each $\leq$1.25\,Gbps~\cite{aws-vpn-quotas}
+  (ECMP across tunnels needs AWS Transit Gateway); plan on 1\,Gbps effective. Same-metro RTT $<$5\,ms (to be
+  measured), so a synchronous commit costs only a few ms. \\
+Pricing (planning figures, not quotes) & Internet egress $\approx$\$0.114/GB from AWS Sydney~\cite{aws-egress-au} to
+  \$0.19/GiB for GCP Premium Tier to Australia~\cite{gcp-net-pricing}. T4 GPU VM $\approx$\$0.7/h (AWS
+  \texttt{g4dn.xlarge} $\approx$\$0.68/h~\cite{doit-g4dn}; GCP \texttt{n1-standard-4} $\approx$\$0.27/h~\cite{holori-n1} + T4,
+  \$0.35/h US list~\cite{gcp-gpu-pricing}). S3 Standard Sydney $\approx$\$0.025/GB-month~\cite{s3-pricing}.
+  Always-on 4 GPUs $\approx$\$2.0k/month vs.\ on demand ($\approx$10 GPU-h/day + 1 warm GPU in business hours)
+  $\approx$\$0.46k/month, for a $\approx$5\,min cold start (to be measured). \\
 Regions & Both clouds in Sydney: widest Australian GPU supply; data stays in Australia, because camera
-  traps also photograph people~\cite{oaic}. GPU models differ by provider and region~\cite{gcp-gpu}, so each
-  pool uses what its quota offers, and the hardware is recorded in provenance. \\
+  traps also photograph people~\cite{oaic}. GCP Sydney offers T4 (zones \texttt{-a}, \texttt{-c}) but no L4~\cite{gcp-gpu},
+  and AWS Sydney offers T4 in \texttt{g4dn}~\cite{aws-g4-sydney}, so \textbf{both clouds use NVIDIA T4}: identical
+  numerics, and a spilled stage behaves the same. Sydney GPU capacity can be tight, so quota is requested
+  in advance. \\
 Third parties & Partner OIDC IdP; provider-neutral DNS; GitHub Actions; and the \emph{quorum witness}: one
   etcd voter at an independent third site, holding only leader keys (no job data, no processing, so not a
   third compute provider). Images and model weights are mirrored into our own registries and buckets. \\
@@ -206,7 +210,7 @@ volume with the Linux watchdog enabled~\cite{patroni-watchdog}. Failover drills 
 
 \textbf{Holding the cap.} Node pools have \texttt{max\_size} system 1, CPU 7 and GPU 2 per cloud. Upgrades
 and repairs must not exceed it, so a node is removed before its replacement is created (EKS
-\texttt{MINIMAL} updates, GKE zero-surge)~\cite{eks-update,gke-upgrade}. Restricted provisioning roles stop pools
+\texttt{MINIMAL} update strategy, GKE \texttt{maxSurge=0}, \texttt{maxUnavailable=1})~\cite{eks-update,gke-upgrade}. Restricted provisioning roles stop pools
 being added outside Terraform; an alert fires at 19 VMs. An \emph{unreachable} VM still counts until its
 termination is confirmed. CPU workers use spot (a preemption is just a lease expiry); GPU and system/state
 nodes are on-demand.
@@ -218,7 +222,7 @@ image: an init container fetches \texttt{model@version}, verifies its SHA-256 an
 read-only, model-only cache; tenant data never enters it.
 
 \textbf{Isolation and scaling.} Each attempt is a finite Kubernetes Job: KEDA \emph{ScaledJobs}~\cite{keda}
-launch one single-use pod per eligible queued lease, counting pending pods to avoid over-launch. A pod
+launch one single-use pod per eligible queued lease; the \texttt{accurate} strategy subtracts pending Jobs to avoid over-launch. A pod
 claims a lease only after its startup checks pass, runs one attempt and exits, so every tenant job gets
 a fresh pod and scratch \texttt{emptyDir}. Requests cover CPU, RAM, ephemeral disk and GPU, and required
 anti-affinity places one attempt per worker VM. The cluster autoscaler works within pool bounds; GPU pools
@@ -330,18 +334,21 @@ Patroni-aware endpoint.
 non-overlapping CIDRs)~\cite{gcp-havpn}, with mTLS for services, etcd peers and replication. Cross-cloud traffic
 is DB replication, writes from the GCP job service, report copies and rare spills; partners'
 presigned-URL traffic never crosses clouds. Replicating every raw input would move $\approx$9\,TB/month
-($\approx$\$1{,}080--1{,}710); data-local placement leaves reports (100$\times$10\,MB$\times$30 $\approx$
-30\,GB/month) plus small DB/WAL traffic and occasional spills ($\approx$\$0.02--0.06 each).
+($\approx$\$1.0--1.5k); data-local placement leaves reports (100$\times$10\,MB$\times$30 $\approx$
+30\,GB/month) plus small DB/WAL traffic and occasional spills ($\approx$\$0.02--0.05 each).
 
 \textbf{Why failover is safe and automatic.} (1)~\emph{An isolated old leader cannot acknowledge anything}: its
 commits wait for the unreachable standby, and switching to asynchronous mode requires updating the
 \texttt{/sync} key in etcd, which needs a quorum it no longer has. Once its leader key expires (TTL 30\,s) it
 demotes itself; the watchdog resets the node if Patroni itself hangs. (2)~\emph{Only an up-to-date node can be
-promoted}: Patroni promotes only members listed in \texttt{/sync}, and a member is removed from that list
-(by quorum) \emph{before} the leader stops waiting for it. (3)~\emph{Degraded mode is explicit}: the surviving
+promoted}: Patroni never auto-promotes a member that is not in \texttt{/sync}, and a member stays a
+synchronous standby in PostgreSQL for as long as \texttt{/sync} lists it, so it leaves the list (a quorum
+write) \emph{before} the leader stops waiting for it~\cite{patroni-sync}. (3)~\emph{Degraded mode is explicit}: the surviving
 leader keeps writing asynchronously only after recording in etcd that the other node is ineligible; that
-node must catch up (via \texttt{pg\_rewind}) before it can rejoin the list. Hence no acknowledged decision is
-ever lost or forked, and no human is needed.
+node must catch up (via \texttt{pg\_rewind}) before it can rejoin the list. (4)~\emph{No cancelled commit
+waits}: a cancelled wait leaves a commit visible locally but unreplicated~\cite{patroni-sync}, so clients
+never cancel \texttt{COMMIT}; an unknown outcome is retried idempotently. Hence no acknowledged decision is
+lost or forked, and no human is needed.
 
 \begin{table}[H]\centering\small
 \begin{tabularx}{\linewidth}{@{}L{2.7cm}Y@{}}
@@ -394,11 +401,11 @@ every state transition.
 \textbf{Decision} & \textbf{Rejected alternative} & \textbf{Why} & \textbf{Accepted cost} \\ \midrule
 PostgreSQL as job store and queue & SQS / Pub/Sub + DB & One transaction for state, queue and leases: no dual-write & The DB is critical, hence quorum replication \\
 Pull-based fenced leases & Central push scheduler & Discovery and load balancing for free; the store enforces the fence & Polling delay of seconds \\
-Patroni, synchronous standby, 3-voter etcd & RDS + async cross-cloud replica & Automatic failover, RPO\,=\,0, isolated leader cannot acknowledge & Self-managed DB, +few ms per commit, third-site witness (fallback: operator-run promotion) \\
-Data-local jobs, inputs not replicated & Mirror every batch & Saves $\approx$\$1.1--1.7k/month of egress & Home-storage outage pauses those jobs \\
+Patroni, synchronous standby, 3-voter etcd & Managed DB (in-provider HA) + async cross-cloud replica & Automatic failover, RPO\,=\,0, isolated leader cannot acknowledge & Self-managed DB, +few ms per commit, third-site witness (fallback: operator-run promotion) \\
+Data-local jobs, inputs not replicated & Mirror every batch & Saves $\approx$\$1.0--1.5k/month of egress & Home-storage outage pauses those jobs \\
 Spill prepared data only & Spill raw batch & 10--20$\times$ less egress per spill & Spill only after prep is published \\
 Rerun after uncertain failure & Adopt the orphan output & Single publication path & $\approx$6 GPU-min per incident \\
-GPUs scale to zero (+1 warm) & Always-on GPUs & Saves $\approx$\$2.7k/month & $\approx$5\,min cold start \\
+GPUs scale to zero (+1 warm) & Always-on GPUs & Saves $\approx$\$1.5k/month & $\approx$5\,min cold start \\
 Spot CPU, on-demand GPU & All on-demand / all spot & Preemption is just a lease expiry; GPU slots are scarce & Occasional CPU reruns \\
 \bottomrule
 \end{tabularx}
@@ -444,7 +451,7 @@ Plain YAML applied with \texttt{kubectl} & Kept, run from CI on both clusters & 
   \url{https://www.postgresql.org/docs/current/functions-datetime.html}
 \bibitem{pg-rls} PostgreSQL Global Development Group, ``Row security policies.''
   \url{https://www.postgresql.org/docs/current/ddl-rowsecurity.html}
-\bibitem{keda} KEDA Authors, ``Scaling jobs (ScaledJob).'' \url{https://keda.sh/docs/latest/concepts/scaling-jobs/}
+\bibitem{keda} KEDA Authors, ``ScaledJob specification (scaling strategies).'' \url{https://keda.sh/docs/2.16/reference/scaledjob-spec/}
 \bibitem{aws-sts} Amazon Web Services, ``AssumeRole,'' AWS STS API reference.
   \url{https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html}
 \bibitem{s3-cond} Amazon Web Services, ``Conditional writes,'' Amazon S3 user guide.
@@ -455,8 +462,8 @@ Plain YAML applied with \texttt{kubectl} & Kept, run from CI on both clusters & 
   \url{https://cloud.google.com/network-connectivity/docs/vpn/tutorials/create-ha-vpn-connections-google-cloud-aws}
 \bibitem{aws-vpn-quotas} Amazon Web Services, ``Site-to-Site VPN quotas.''
   \url{https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-limits.html}
-\bibitem{eks-update} Amazon Web Services, ``Understand each phase of node updates,'' Amazon EKS user guide.
-  \url{https://docs.aws.amazon.com/eks/latest/userguide/managed-node-update-behavior.html}
+\bibitem{eks-update} Amazon Web Services, ``NodegroupUpdateConfig (updateStrategy: DEFAULT | MINIMAL),'' Amazon EKS API reference.
+  \url{https://docs.aws.amazon.com/eks/latest/APIReference/API_NodegroupUpdateConfig.html}
 \bibitem{gke-upgrade} Google Cloud, ``Node pool upgrade strategies,'' GKE documentation.
   \url{https://cloud.google.com/kubernetes-engine/docs/concepts/node-pool-upgrade-strategies}
 \bibitem{eks-pod-identity} Amazon Web Services, ``EKS Pod Identity.''
@@ -465,9 +472,18 @@ Plain YAML applied with \texttt{kubectl} & Kept, run from CI on both clusters & 
   \url{https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity}
 \bibitem{gcp-gpu} Google Cloud, ``GPU regions and zones availability.''
   \url{https://cloud.google.com/compute/docs/gpus/gpu-regions-zones}
-\bibitem{gcs-pricing} Google Cloud, ``Cloud Storage pricing.'' \url{https://cloud.google.com/storage/pricing}
-\bibitem{aws-pricing} Amazon Web Services, ``Amazon EC2 on-demand pricing: data transfer.''
-  \url{https://aws.amazon.com/ec2/pricing/on-demand/}
+\bibitem{gcp-net-pricing} Google Cloud, ``Network pricing (Premium Tier internet egress).''
+  \url{https://cloud.google.com/vpc/network-pricing}
+\bibitem{aws-egress-au} Amazon Web Services, ``AWS data transfer price reductions: up to 34\% (Japan) and 28\% (Australia),'' AWS News Blog.
+  \url{https://aws.amazon.com/blogs/aws/aws-data-transfer-price-reductions-up-to-34-japan-and-28-australia/}
+\bibitem{gcp-gpu-pricing} Google Cloud, ``GPU pricing.'' \url{https://cloud.google.com/products/compute/gpus-pricing}
+\bibitem{doit-g4dn} DoiT, ``AWS EC2 g4dn.xlarge pricing in ap-southeast-2'' (third-party tracker).
+  \url{https://www.doit.com/compute/spot/ap-southeast-2/g4dn.xlarge}
+\bibitem{holori-n1} Holori, ``GCP n1-standard-4 in australia-southeast1'' (third-party calculator).
+  \url{https://calculator.holori.com/gcp/vm/n1-standard-4/australia-southeast1}
+\bibitem{s3-pricing} Amazon Web Services, ``Amazon S3 pricing.'' \url{https://aws.amazon.com/s3/pricing/}
+\bibitem{aws-g4-sydney} Amazon Web Services, ``Amazon EC2 G4 instances with NVIDIA T4 now available in 6 additional regions (incl.\ Sydney),'' 2019.
+  \url{https://aws.amazon.com/about-aws/whats-new/2019/10/amazon-ec2-g4-instances-with-nvidia-t4-tensor-core-gpus-now-available-in-6-additional-regions/}
 \bibitem{cosign} Sigstore, ``Cosign: signing containers.'' \url{https://docs.sigstore.dev/}
 \bibitem{oaic} Office of the Australian Information Commissioner, ``The Privacy Act.''
   \url{https://www.oaic.gov.au/privacy/the-privacy-act}

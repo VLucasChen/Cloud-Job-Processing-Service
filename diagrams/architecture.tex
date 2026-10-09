@@ -47,7 +47,7 @@
 \node[cmp, minimum width=3.5cm] (cpuA) at (2.0,5.95)
   {\textbf{CPU pool}: spot, 0--7 VMs\\stage 1 prep $\cdot$ stage 3 report};
 \node[cmp, minimum width=3.5cm] (gpuA) at (5.85,5.95)
-  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID};
+  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (T4)};
 \node[sto, minimum width=7.35cm, text width=7.15cm] (s3) at (3.925,4.35)
   {\textbf{S3: one bucket per tenant} (SSE-KMS, per-tenant key)\\
    {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/}}};
@@ -68,7 +68,7 @@
 \node[cmp, minimum width=3.5cm] (cpuG) at (15.6,5.95)
   {\textbf{CPU pool}: spot, 0--7 VMs\\stage 1 prep $\cdot$ stage 3 report};
 \node[cmp, minimum width=3.5cm] (gpuG) at (11.75,5.95)
-  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID};
+  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (T4)};
 \node[sto, minimum width=7.35cm, text width=7.15cm] (gcs) at (13.675,4.35)
   {\textbf{GCS: one bucket per tenant} (CMEK, per-tenant key)\\
    {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/} (copies)}};
