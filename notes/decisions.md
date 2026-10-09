@@ -110,19 +110,21 @@ Status legend: `PROPOSED` (recommended, awaiting decision) ·
 - **v2:** rejected to keep a single publication path; mentioned as "considered" in §7.
 - **Decision:**
 
-## D8. Writer failover: gated promotion, no receipts — `ACCEPTED (final)`
+## D8. Metadata HA: Patroni + synchronous standby + 3-voter etcd — `ACCEPTED (final)`
 
-- Acceptance = one durable commit on the Multi-AZ primary (no synchronous cross-cloud copy).
-- Reports are copied and verified in both clouds before `COMPLETED`; a completion-catalog entry
-  is mirrored to GCP afterwards for outage reads.
-- Routing (DNS, runners) fails over automatically. **Writer** failover is a scripted,
-  operator-approved runbook: pause → fence the old writer via the AWS control plane →
-  verify the standby applied the final WAL position → promote once, bump generation.
-  If fencing or completeness cannot be proven, stay read-only and wait.
-- **Why final:** the v2 receipt/backlog protocol had real holes (a stale backlog=0 report;
-  statement timeouts don't bound transactions or paused clients; post-takeover admission
-  contradicted the dual-receipt rule). Patching it would add more protocol than can be
-  explained and defended. Trade-off: no bounded write RTO in an ambiguous partition.
+- One PostgreSQL node per cloud on the system/state node, managed by Patroni; leader (AWS) +
+  synchronous standby (GCP), `synchronous_commit=on`; same-metro RTT < 5 ms.
+- etcd quorum of three voters: AWS, GCP, and a third-site witness (leader keys only, no job data,
+  no processing).
+- Safety: an isolated leader cannot acknowledge commits (standby unreachable) and cannot switch to
+  async (needs a quorum write to `/sync`); leader key TTL 30 s + watchdog. Only members listed in
+  `/sync` can be promoted, and a member is removed by quorum before the leader stops waiting for it.
+- Result: automatic failover in ~30–60 s, RPO = 0 for acknowledged commits, explicit degraded mode.
+- Cost: self-managed DB instead of RDS/Cloud SQL, a few ms per commit, third-site dependency.
+  Fallback if a third site is not allowed: async replica + operator-run gated promotion.
+- History: v2 receipt/backlog protocol had holes (stale backlog, timeouts are not fencing,
+  post-takeover admission conflict); the gated-runbook version was correct but gave no automatic
+  write failover. Quorum + sync replication fixes both.
 
 ## D9. Tenant isolation — `PROPOSED`
 
