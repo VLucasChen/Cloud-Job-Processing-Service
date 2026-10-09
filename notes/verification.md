@@ -67,3 +67,14 @@ worded cautiously in the report.
 - Mirroring all inputs: 9 TB/month → 9,000 GB × $0.114 = $1,026 (AWS) to 8,382 GiB tiered at $0.19/$0.18 ≈ $1,519 (GCP) → **≈ $1.0–1.5k/month**.
 - One prepared-data spill: 0.15–0.3 GB × $0.114–0.19 → **≈ $0.02–0.05**.
 - Report mirroring: 100 × 10 MB × 30 = 30 GB/month → ≈ $3–6.
+
+## SmartPark (A1) facts used in Table 6 (checked against the A1 repository)
+
+| Claim | Evidence in A1 | Caveat kept in the report |
+|---|---|---|
+| CPU-based HPA | `autoscaling/v2`, min 1, max 8, `Resource/cpu` `averageUtilization: 60` (of the pod's request); applied only with `WITH_HPA=1` | Scale-out/in observed (1→4→1) but the threshold was never isolated; no A1 evidence is claimed for thresholds |
+| Benchmark conditions | `05_benchmark.sh` line 16 deletes the HPA first, so the 1/2/4/8 table used fixed replicas | Not cited as autoscaling evidence |
+| L4 LoadBalancer | `Service type: LoadBalancer` (GCP network LB) + headless Service (`clusterIP: None`) for OPS-API-2 discovery | After scale-out: old pod 994 m CPU, new pod 3 m with zero requests (per-connection balancing) |
+| Init container | `curlimages/curl:8.11.1` downloads `model.pt` and a 300-image `tar.gz` into `emptyDir`; no version pin, no checksum | Report says "kept, now pinned by version and SHA-256" |
+| Deployment tooling | plain YAML, `sed` replaces `${IMAGE}` and `${ASSETS_BUCKET}`, then `kubectl apply -f -`; no Helm/Kustomize | — |
+| L7 Ingress | `ingressClassName: gce` with NEG + BackendConfig; backends never became healthy, never used | Stated as a lesson, not as something that worked |

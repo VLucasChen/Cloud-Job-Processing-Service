@@ -46,7 +46,7 @@
 \vspace{0.5cm}
 {\color{accent}\rule{\linewidth}{1.2pt}\par}
 \vspace{1.5cm}
-{\Large Lucas Huang\par}
+{\Large YICHEN HUANG\par}
 \ifx\studentid\empty\else\vspace{0.2cm}{\large Student ID: \studentid\par}\fi
 \vspace{0.4cm}
 {\large 9 October 2026\par}
@@ -413,13 +413,24 @@ Spot CPU, on-demand GPU & All on-demand / all spot & Preemption is just a lease 
 \end{table}
 \vspace{-8pt}
 \begin{table}[H]\centering\small
-\begin{tabularx}{\linewidth}{@{}L{4.0cm}L{3.6cm}Y@{}}
+\begin{tabularx}{\linewidth}{@{}L{4.6cm}L{3.3cm}Y@{}}
 \toprule
 \textbf{What SmartPark (A1) actually ran}~\cite{smartpark} & \textbf{Here} & \textbf{Reason} \\ \midrule
-HPA scaling on CPU utilisation & KEDA scaling on queue depth & CPU cannot see a GPU backlog; queue depth can \\
-Long-running Deployment behind a LoadBalancer & Finite single-use Jobs that pull work & 5--30\,min batch stages need per-tenant isolation and exactly-once publication \\
-Init container loading the model at start & Kept, now pinned by version and SHA-256 & Worked in practice; pinning makes results reproducible \\
-Plain YAML applied with \texttt{kubectl} & Kept, run from CI on both clusters & Enough for two clusters; Helm/Argo CD would add controllers for little gain \\
+Optional HPA (\texttt{autoscaling/v2}, 1--8 replicas, CPU at 60\% of the pod's request); scale-out/in was observed,
+  but the threshold itself was never isolated, and the 1/2/4/8 benchmark ran at fixed replicas
+  & KEDA scaling on queue depth & CPU cannot see a GPU backlog, but queue depth can. No A1 result is claimed as
+  evidence for any autoscaling threshold. \\
+Long-running Deployment behind an \emph{L4} network LoadBalancer (+ a headless Service for pod discovery)
+  & Finite single-use Jobs that pull work & L4 balancing is per connection: after scale-out, A1 measured the old pod at
+  994\,m CPU and the new pod at 3\,m with no requests. Pulled leases cannot leave a new worker idle. \\
+Init container \texttt{curl}-ing the latest model and a 300-image dataset into \texttt{emptyDir}, with no version
+  or checksum & Kept, pinned by version and SHA-256 & The pattern worked, but an unpinned download is not
+  reproducible. \\
+Plain YAML with two \texttt{sed}-substituted variables, then \texttt{kubectl apply} & Kept; CI substitutes image
+  digests for both clusters & Enough for two clusters; Helm/Argo CD would add controllers for little gain. \\
+L7 Ingress (GCE class, NEG, BackendConfig) was written, but its backends never became healthy, so it was never used
+  & Provider-managed front ends (ALB for Fargate, Cloud Run HTTPS), health-checked on the same \texttt{/readyz}
+  & A real lesson: avoid self-configured Ingress health wiring in the critical path. \\
 \bottomrule
 \end{tabularx}
 \caption{Lessons carried over from SmartPark.}
@@ -487,8 +498,9 @@ Plain YAML applied with \texttt{kubectl} & Kept, run from CI on both clusters & 
 \bibitem{cosign} Sigstore, ``Cosign: signing containers.'' \url{https://docs.sigstore.dev/}
 \bibitem{oaic} Office of the Australian Information Commissioner, ``The Privacy Act.''
   \url{https://www.oaic.gov.au/privacy/the-privacy-act}
-\bibitem{smartpark} L.~Huang, ``SmartPark: ML-based cloud parking platform,'' FIT3184 Assignment 1
-  (FastAPI, Docker, GKE, HPA, init-container model loading), Monash University, 2026.
+\bibitem{smartpark} Y.~Huang, ``SmartPark: ML-based cloud parking platform,'' FIT3184 Assignment 1
+  (FastAPI, Docker, GKE, L4 LoadBalancer, optional CPU-based HPA, init-container model and dataset loading),
+  Monash University, 2026.
 \end{thebibliography}
 
 \end{document}
