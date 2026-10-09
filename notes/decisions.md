@@ -67,6 +67,8 @@ Status legend: `PROPOSED` (recommended, awaiting decision) ·
 
 - **Options:** plain VMs + Docker + systemd agent · **managed K8s per cloud
   (EKS + GKE)** · Nomad multi-region
+- **Final toolchain:** plain YAML manifests + `kubectl apply` from CI (digest-pinned),
+  scheduled `kubectl diff` for drift; Helm + Argo CD rejected as extra controllers for 2 clusters.
 - **Recommendation:** EKS + GKE. Use node pools with taints (GPU pool only runs
   the identify stage), cluster autoscaler with hard `max` per pool (enforces the VM
   cap), NetworkPolicies, and workload identity. KEDA **ScaledJobs** create one
@@ -108,22 +110,19 @@ Status legend: `PROPOSED` (recommended, awaiting decision) ·
 - **v2:** rejected to keep a single publication path; mentioned as "considered" in §7.
 - **Decision:**
 
-## D8. Visibility rule: receipts in both clouds — `PROPOSED (v2)`
+## D8. Writer failover: gated promotion, no receipts — `ACCEPTED (final)`
 
-- Three immutable receipts (**acceptance**, **stage publication**, **completion**) are
-  mirrored to both clouds *before* the state becomes visible: before the 202, before the
-  next stage is queued, before the partner is notified. Each transition is two-step in the
-  DB (e.g. `PUBLISHING → SUCCEEDED`), driven by an outbox worker.
-- Promotion of the GCP replica is allowed only when (a) the witness writer lease has
-  expired (old writer fenced) **and** (b) its last renewal reported receipt backlog = 0.
-  GCP then reconciles from receipts with the same attempt IDs, so a visible result is never
-  re-published differently. Otherwise: read-only until an operator decides.
-- GCP outage: AWS continues in degraded mode with local receipts; the non-zero backlog
-  blocks automatic promotion until GCP returns and drains it.
-- **v2 change:** v1 claimed automatic failover with RTO 5 min and RPO 0 although only
-  acceptances were journaled; a stale replica could have re-run and re-published a stage
-  differently.
-- **Decision:**
+- Acceptance = one durable commit on the Multi-AZ primary (no synchronous cross-cloud copy).
+- Reports are copied and verified in both clouds before `COMPLETED`; a completion-catalog entry
+  is mirrored to GCP afterwards for outage reads.
+- Routing (DNS, runners) fails over automatically. **Writer** failover is a scripted,
+  operator-approved runbook: pause → fence the old writer via the AWS control plane →
+  verify the standby applied the final WAL position → promote once, bump generation.
+  If fencing or completeness cannot be proven, stay read-only and wait.
+- **Why final:** the v2 receipt/backlog protocol had real holes (a stale backlog=0 report;
+  statement timeouts don't bound transactions or paused clients; post-takeover admission
+  contradicted the dual-receipt rule). Patching it would add more protocol than can be
+  explained and defended. Trade-off: no bounded write RTO in an ambiguous partition.
 
 ## D9. Tenant isolation — `PROPOSED`
 

@@ -89,7 +89,7 @@ Clouds used throughout: **AWS (primary DB) + GCP**, both in Sydney
 
 | Item | Planning figure |
 |---|---|
-| Internet / inter-cloud egress | **~$0.12/GB** (published Sydney rates are about $0.09–0.19/GB depending on provider/tier) |
+| Internet / inter-cloud egress | **$0.12–0.19/GB** range (GCS to Australia lists ≈ $0.19/GiB; AWS depends on service and path) |
 | Ingress | free |
 | Object storage standard / infrequent / archive | ~$0.025 / ~$0.0125 / ~$0.002–0.005 per GB-month |
 | GPU VM (A10G `g5.xlarge` / L4 `g2-standard-4`) | ~$1.0–1.5/h on-demand, planning **$1.2/h** |
@@ -132,7 +132,7 @@ inputs are small, so report generation can run in either cloud.
 | Intermediates | same bucket, `jobs/{id}/stage{n}/attempt-{k}/` | delete 7 days after job is terminal; orphan attempts are GC'd after 24 h | immutable once written |
 | Reports | per-tenant bucket, **replicated to both clouds** | Standard → Infrequent at 30 days; keep 1 year `[CONFIRM]` | versioning + object lock (WORM); cross-cloud copy |
 | Job metadata | PostgreSQL (AWS RDS primary, GCP Cloud SQL async replica) | PITR 14 days | Multi-AZ + cross-cloud replica + daily snapshot |
-| Receipts (acceptance / publication / completion) | small JSON records mirrored to **both** clouds before the state becomes visible | kept with the job | let a promoted replica reconcile lost transitions without re-publishing differently |
+| Completion catalog | small entry per completed job mirrored to GCP after `COMPLETED` | kept with the report | outage reads of status/report pointers; not a commit log, never used to justify promotion |
 | Logs / metrics | each cloud's native stack + central copy | 30 d hot, 1 y archive | |
 
 Steady-state input storage: 9 TB × $0.025 ≈ **$225/mo**. Everything else is negligible.

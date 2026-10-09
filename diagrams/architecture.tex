@@ -37,7 +37,7 @@
 \node[ext, minimum width=3.6cm] (dns) at (8.8,9.55)
   {\textbf{Global DNS + health checks}\\provider-neutral third party};
 \node[ext, minimum width=4.0cm] (wit) at (15.6,9.55)
-  {\textbf{Failover witness} (third party)\\writer lease $\cdot$ generation $\cdot$ receipt backlog};
+  {\textbf{Writer failover runbook} (scripted)\\pause $\rightarrow$ fence $\rightarrow$ verify $\rightarrow$ promote};
 
 % ================= AWS (left)
 \node[ctl, minimum width=3.8cm] (jobA) at (2.15,7.7)
@@ -47,10 +47,10 @@
 \node[cmp, minimum width=3.5cm] (cpuA) at (2.0,5.95)
   {\textbf{CPU pool}: spot, 0--7 VMs\\stage 1 prep $\cdot$ stage 3 report};
 \node[cmp, minimum width=3.5cm] (gpuA) at (5.85,5.95)
-  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (L4 preferred)};
+  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID};
 \node[sto, minimum width=7.35cm, text width=7.15cm] (s3) at (3.925,4.35)
   {\textbf{S3: one bucket per tenant} (SSE-KMS, per-tenant key)\\
-   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/} $\cdot$ \texttt{receipts/}}};
+   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/} $\cdot$ \texttt{catalog/}}};
 \node[anchor=west, align=left, font=\tiny] (noteA) at (0.25,3.2)
   {\scriptsize\textbf{\textcolor{awsB}{AWS ap-southeast-2 (Sydney)}}\\
    EKS $\cdot$ 1 system node $\cdot$ KEDA ScaledJobs\\single-use pods $\cdot$ GPU taints $\cdot$ ECR (digest-pinned, signed)};
@@ -62,16 +62,16 @@
 
 % ================= GCP (right, mirrored: x' = 17.6 - x)
 \node[ctl, minimum width=3.8cm] (jobG) at (15.45,7.7)
-  {\textbf{Job service}\\Cloud Run, stateless, active\\writes go to the primary DB};
+  {\textbf{Job service}\\Cloud Run, stateless, active\\writes $\rightarrow$ AWS primary};
 \node[ctl, minimum width=3.05cm, fill=gcpF!60] (dbG) at (11.525,7.7)
   {\textbf{Cloud SQL PostgreSQL}\\async REPLICA\\promotable};
 \node[cmp, minimum width=3.5cm] (cpuG) at (15.6,5.95)
   {\textbf{CPU pool}: spot, 0--7 VMs\\stage 1 prep $\cdot$ stage 3 report};
 \node[cmp, minimum width=3.5cm] (gpuG) at (11.75,5.95)
-  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (L4 preferred)};
+  {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID};
 \node[sto, minimum width=7.35cm, text width=7.15cm] (gcs) at (13.675,4.35)
   {\textbf{GCS: one bucket per tenant} (CMEK, per-tenant key)\\
-   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/} (copy) $\cdot$ \texttt{receipts/}}};
+   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/} (copy) $\cdot$ \texttt{catalog/}}};
 \node[anchor=east, align=right, font=\tiny] (noteG) at (17.35,3.2)
   {\scriptsize\textbf{\textcolor{gcpB}{GCP australia-southeast1 (Sydney)}}\\
    GKE $\cdot$ 1 system node $\cdot$ KEDA ScaledJobs\\single-use pods $\cdot$ GPU taints $\cdot$ Artifact Registry};
@@ -84,7 +84,7 @@
 % ================= cross-cloud links (teal)
 \draw[arr, rep, dashed] (dbA.east) -- node[lbl, above, text=rep] {async\\repl.} (dbG.west);
 \draw[biarr, rep, dotted] (gpuA.east) -- node[lbl, above, text=rep] {GPU spill:\\prepared\\data only} (gpuG.west);
-\draw[biarr, rep, dashed] (s3.east) -- node[lbl, above, text=rep] {reports,\\receipts} (gcs.west);
+\draw[biarr, rep, dashed] (s3.east) -- node[lbl, above, text=rep] {reports,\\catalog} (gcs.west);
 \node[lbl, text=rep, font=\tiny\bfseries] at (8.8,3.2) {HA VPN\\(IPsec, BGP)\\+ mTLS};
 
 % ================= lifecycle (red, numbered)
@@ -100,9 +100,9 @@
 \draw[arr, flow] (gpuG.north -| 12.4,0) |- (14.1,6.85) -- (jobG.south -| 14.1,0);
 \draw[biarr, flow] (cpuG.south) -- (cpuG.south |- gcs.north);
 \draw[biarr, flow] (gpuG.south) -- (gpuG.south |- gcs.north);
-\draw[arr, black!60] (jobG.west) -- (dbG.east);
+\draw[arr, black!60, dashed] (jobG.west) -- (dbG.east);
 
-% ================= DNS + witness (grey, dashed)
+% ================= DNS + failover runbook (grey, dashed)
 \draw[dashed, extB, arr] (dns.south -| 8.4,0) -- ++(0,-0.3) -| (jobA.north -| 3.0,0);
 \draw[dashed, extB, arr] (dns.south -| 9.2,0) -- ++(0,-0.3) -| (jobG.north -| 14.0,0);
 \draw[dashed, extB, biarr] (wit.south -| 16.6,0) -- (jobG.north -| 16.6,0);
@@ -113,15 +113,15 @@
   {\textbf{Observability}: logs, metrics, traces per cloud $\rightarrow$ central dashboards + alerts\\{\tiny queue age $\cdot$ lease expiries $\cdot$ retries $\cdot$ GPU util $\cdot$ VMs vs.\ cap $\cdot$ replication lag $\cdot$ egress}
 };
 \node[ext, minimum width=8.6cm, text width=8.4cm, anchor=north east] (ci) at ($(gcp.south east)+(0,-0.2)$)
-  {\textbf{CI/CD + IaC}: GitHub Actions (OIDC) $\rightarrow$ Terraform (both clouds)\\{\tiny Helm + Argo CD (GitOps) $\cdot$ images built once, signed, pushed to both registries}
+  {\textbf{CI/CD + IaC}: GitHub Actions (OIDC) $\rightarrow$ Terraform (both clouds)\\{\tiny plain YAML + \texttt{kubectl apply} from CI (digest-pinned) $\cdot$ images signed, pushed to both registries}
 };
 
-\node[anchor=north west, font=\tiny, align=left, text width=17.3cm] at ($(obs.south west)+(0,-0.1)$)
+\node[anchor=north west, font=\scriptsize, align=left, text width=17.3cm] at ($(obs.south west)+(0,-0.1)$)
   {\textcolor{flow}{\textbf{Job lifecycle}}: (1) log in; (2) \texttt{POST /jobs} via DNS to a healthy job service;
-   (3) multipart upload straight to presigned URLs in the home cloud; (4) on \texttt{submit}: SHA-256 verified, acceptance receipt in \emph{both} clouds, then \texttt{ACCEPTED} and \texttt{202};
-   (5) runners pull a lease for their pool; (6) read the published input, write a create-only attempt prefix, publish via a fenced conditional commit;
-   (7) report verified in both clouds, then \texttt{COMPLETED} and download via a presigned URL.
-   \textcolor{rep}{\textbf{Teal}}: cross-cloud traffic. VM cap: 2 system + 14 CPU + 4 GPU = 20; managed services (DB, Fargate/Cloud Run, K8s masters) are outside it.};
+   (3) multipart upload straight to presigned URLs in the home cloud; (4) on \texttt{submit}: SHA-256 verified, \texttt{ACCEPTED} committed on the primary, \texttt{202};
+   (5) runners pull a lease for their pool; (6) read the published input, write a create-only attempt prefix; the coordinator publishes it with a fenced conditional commit;
+   (7) report verified in both clouds, then \texttt{COMPLETED}; download via a presigned URL.
+   \textcolor{rep}{\textbf{Teal}}: cross-cloud traffic (the DB link is one-way async replication, not a second writer). VM cap: 2 system + 14 CPU + 4 GPU = 20; managed services are outside it.};
 
 \end{tikzpicture}
 \end{document}
