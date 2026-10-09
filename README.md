@@ -6,7 +6,7 @@ Due **Fri 9 Oct 2026 23:55**. Design only, no implementation.
 
 > Keep this repository **private** until after the deadline (grading is rank-based).
 
-**Status:** final (5 content pages + cover, contents, references). Facts checked in `notes/verification.md`.
+**Status:** final (5 content pages + cover, contents, references). Facts and links checked in `notes/verification.md`.
 
 ## Layout
 

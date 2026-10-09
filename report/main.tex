@@ -10,7 +10,7 @@
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{enumitem}
-\usepackage{xcolor}
+\usepackage[table]{xcolor}
 \usepackage[hidelinks]{hyperref}
 \usepackage{titlesec}
 \usepackage{float}
@@ -369,7 +369,9 @@ Witness + one cloud & No quorum: the survivor serves reads only. An operator run
 \caption{Behaviour under provider and network failures.}
 \end{table}
 \vspace{-8pt}
-Capacity after losing a cloud is $\leq$10 VMs (2 GPU, 20 jobs/h), because unreachable VMs still count.
+After losing a cloud the survivor keeps its 10 VMs (2 GPU, 20 jobs/h) while the other cloud's VMs cannot be
+proven gone; once they are confirmed terminated through that cloud's control plane, CI raises the survivor's
+limits up to 20 VMs and 4 GPUs (T4 quota is pre-requested in both clouds).
 \textbf{Failback:} the old leader is rewound and resynchronised as standby, then switched back in a quiet window.
 
 % =====================================================================
@@ -394,46 +396,33 @@ and encrypted volumes and backups at rest. Audit: CloudTrail data events, GCS ac
 every state transition.
 
 % =====================================================================
-\section{Trade-offs, and Lessons from SmartPark}
-\begin{table}[H]\centering\small
-\begin{tabularx}{\linewidth}{@{}L{2.6cm}L{3.1cm}YY@{}}
+\section{Trade-offs (incl.\ Lessons from SmartPark)}
+Rows marked \textbf{(A1)} compare against what my SmartPark assignment actually ran~\cite{smartpark}; they are
+evidence from practice, not a claim that A1 validated these settings.
+\begin{table}[H]\centering\footnotesize
+\rowcolors{2}{black!6}{white}
+\begin{tabularx}{\linewidth}{@{}L{3.75cm}L{3.15cm}YL{2.75cm}@{}}
 \toprule
 \textbf{Decision} & \textbf{Rejected alternative} & \textbf{Why} & \textbf{Accepted cost} \\ \midrule
-PostgreSQL as job store and queue & SQS / Pub/Sub + DB & One transaction for state, queue and leases: no dual-write & The DB is critical, hence quorum replication \\
-Pull-based fenced leases & Central push scheduler & Discovery and load balancing for free; the store enforces the fence & Polling delay of seconds \\
-Patroni, synchronous standby, 3-voter etcd & Managed DB (in-provider HA) + async cross-cloud replica & Automatic failover, RPO\,=\,0, isolated leader cannot acknowledge & Self-managed DB, +few ms per commit, third-site witness (fallback: operator-run promotion) \\
-Data-local jobs, inputs not replicated & Mirror every batch & Saves $\approx$\$1.0--1.5k/month of egress & Home-storage outage pauses those jobs \\
-Spill prepared data only & Spill raw batch & 10--20$\times$ less egress per spill & Spill only after prep is published \\
-Rerun after uncertain failure & Adopt the orphan output & Single publication path & $\approx$6 GPU-min per incident \\
-GPUs scale to zero (+1 warm) & Always-on GPUs & Saves $\approx$\$1.5k/month & $\approx$5\,min cold start \\
-Spot CPU, on-demand GPU & All on-demand / all spot & Preemption is just a lease expiry; GPU slots are scarce & Occasional CPU reruns \\
+\textbf{Job store}: PostgreSQL holds state, queue and leases & SQS / Pub/Sub + a DB & One transaction, so no dual-write & The DB is critical, hence quorum replication \\
+\textbf{Metadata HA}: Patroni, sync standby, 3-voter etcd & Managed DB (in-provider HA) + async cross-cloud replica & Automatic failover, RPO\,=\,0; an isolated leader cannot acknowledge & Self-managed DB, +few ms per commit, third-site witness \\
+\textbf{Data placement}: data-local, inputs not replicated & Mirror every batch & Saves $\approx$\$1.0--1.5k/month of egress & Home-storage outage pauses those jobs \\
+\textbf{GPU spill}: prepared data only & Spill the raw batch & 10--20$\times$ less egress per spill & Spill only after prep is published \\
+\textbf{Caching}: no result cache; idempotency keys and stored reports & Per-pod memory cache, TTL 60\,s, key (uuid, $n$) \textbf{(A1)} & A1 saw repeated identical queries; here every batch is unique, a per-pod cache is not shared, and a second store breaks the single source of truth & Identical resubmitted batches are recomputed \\
+\textbf{Work assignment}: runners pull fenced leases & Push behind an L4 load balancer \textbf{(A1)} & L4 balances per connection: A1's new pod got 3\,m CPU vs.\ 994\,m on the old one; pulling cannot leave a worker idle & Polling delay of seconds \\
+\textbf{Autoscaling}: KEDA on queue depth & CPU-based HPA at 60\% \textbf{(A1}; threshold never isolated\textbf{)} & CPU cannot see a GPU backlog; queue depth can & A queue-metrics endpoint to run \\
+\textbf{Uncertain failure}: rerun the stage & Adopt the orphan output & Single publication path & $\approx$6 GPU-min per incident \\
+\textbf{Job service}: $\geq$2 Fargate tasks, Cloud Run min.\ 1 & One task, or scale to zero & A lone restart can outlast the 90\,s lease and void in-flight GPU work; DNS failover ($\approx$3\,min) is too slow & $\approx$\$40--45/month~\cite{fargate-pricing} \\
+\textbf{VM split}: 10 + 10 (2 GPU each); CI rebalances only while both clouds are reachable & All 20 VMs in one cloud & Two-provider compute; warm capacity survives a cloud loss; only 2 T4s per region; data stays local & Two clusters; one more system node \\
+\textbf{GPU pools}: scale to zero (+1 warm) & Always-on GPUs & Saves $\approx$\$1.5k/month & $\approx$5\,min cold start \\
+\textbf{Purchase model}: spot CPU, on-demand GPU & All on-demand, or all spot & A preemption is just a lease expiry; GPU slots are scarce & Occasional CPU reruns \\
+\textbf{Provisioning}: Terraform via CI (plan, review, apply) & One-off \texttt{gcloud container clusters create} \textbf{(A1)} & Two clouds must be identical, reviewable and reproducible; pool limits in code hold the 20-VM cap & Terraform state to manage \\
+\textbf{Deployment}: plain YAML + \texttt{kubectl apply} from CI & Helm + Argo CD & A1's \texttt{sed} + \texttt{kubectl} flow was enough; fewer controllers & Some duplication \\
+\textbf{Model loading}: init container, pinned version + SHA-256 & Latest object, no checksum \textbf{(A1)} & The A1 pattern worked, but unpinned downloads are not reproducible & A release step per model version \\
+\textbf{Front end}: provider-managed ALB / Cloud Run & Self-configured GCE Ingress + NEG \textbf{(A1}: backends never healthy\textbf{)} & Keeps hand-wired health checks off the critical path & Less control over L7 routing \\
 \bottomrule
 \end{tabularx}
 \caption{Key decisions and trade-offs.}
-\end{table}
-\vspace{-8pt}
-\begin{table}[H]\centering\small
-\begin{tabularx}{\linewidth}{@{}L{4.6cm}L{3.3cm}Y@{}}
-\toprule
-\textbf{What SmartPark (A1) actually ran}~\cite{smartpark} & \textbf{Here} & \textbf{Reason} \\ \midrule
-Optional HPA (\texttt{autoscaling/v2}, 1--8 replicas, CPU at 60\% of the pod's request); scale-out/in was observed,
-  but the threshold itself was never isolated, and the 1/2/4/8 benchmark ran at fixed replicas
-  & KEDA scaling on queue depth & CPU cannot see a GPU backlog, but queue depth can. No A1 result is claimed as
-  evidence for any autoscaling threshold. \\
-Long-running Deployment behind an \emph{L4} network LoadBalancer (+ a headless Service for pod discovery)
-  & Finite single-use Jobs that pull work & L4 balancing is per connection: after scale-out, A1 measured the old pod at
-  994\,m CPU and the new pod at 3\,m with no requests. Pulled leases cannot leave a new worker idle. \\
-Init container \texttt{curl}-ing the latest model and a 300-image dataset into \texttt{emptyDir}, with no version
-  or checksum & Kept, pinned by version and SHA-256 & The pattern worked, but an unpinned download is not
-  reproducible. \\
-Plain YAML with two \texttt{sed}-substituted variables, then \texttt{kubectl apply} & Kept; CI substitutes image
-  digests for both clusters & Enough for two clusters; Helm/Argo CD would add controllers for little gain. \\
-L7 Ingress (GCE class, NEG, BackendConfig) was written, but its backends never became healthy, so it was never used
-  & Provider-managed front ends (ALB for Fargate, Cloud Run HTTPS), health-checked on the same \texttt{/readyz}
-  & A real lesson: avoid self-configured Ingress health wiring in the critical path. \\
-\bottomrule
-\end{tabularx}
-\caption{Lessons carried over from SmartPark.}
 \end{table}
 
 % =====================================================================
@@ -455,7 +444,7 @@ L7 Ingress (GCE class, NEG, BackendConfig) was written, but its backends never b
   \url{https://patroni.readthedocs.io/en/latest/replication_modes.html}
 \bibitem{patroni-watchdog} Patroni, ``Watchdog support.'' \url{https://patroni.readthedocs.io/en/latest/watchdog.html}
 \bibitem{pg-syncrep} PostgreSQL Global Development Group, ``Synchronous replication,'' PostgreSQL documentation.
-  \url{https://www.postgresql.org/docs/current/warm-standby.html}
+  \url{https://www.postgresql.org/docs/current/warm-standby.html#SYNCHRONOUS-REPLICATION}
 \bibitem{pg-select} PostgreSQL Global Development Group, ``SELECT: the locking clause (FOR UPDATE, SKIP LOCKED).''
   \url{https://www.postgresql.org/docs/current/sql-select.html}
 \bibitem{pg-time} PostgreSQL Global Development Group, ``Date/time functions: current date/time.''
@@ -468,21 +457,21 @@ L7 Ingress (GCE class, NEG, BackendConfig) was written, but its backends never b
 \bibitem{s3-cond} Amazon Web Services, ``Conditional writes,'' Amazon S3 user guide.
   \url{https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html}
 \bibitem{gcs-pre} Google Cloud, ``Request preconditions,'' Cloud Storage documentation.
-  \url{https://cloud.google.com/storage/docs/request-preconditions}
+  \url{https://docs.cloud.google.com/storage/docs/request-preconditions}
 \bibitem{gcp-havpn} Google Cloud, ``Create HA VPN connections between Google Cloud and AWS.''
-  \url{https://cloud.google.com/network-connectivity/docs/vpn/tutorials/create-ha-vpn-connections-google-cloud-aws}
+  \url{https://docs.cloud.google.com/network-connectivity/docs/vpn/tutorials/create-ha-vpn-connections-google-cloud-aws}
 \bibitem{aws-vpn-quotas} Amazon Web Services, ``Site-to-Site VPN quotas.''
   \url{https://docs.aws.amazon.com/vpn/latest/s2svpn/vpn-limits.html}
 \bibitem{eks-update} Amazon Web Services, ``NodegroupUpdateConfig (updateStrategy: DEFAULT | MINIMAL),'' Amazon EKS API reference.
   \url{https://docs.aws.amazon.com/eks/latest/APIReference/API_NodegroupUpdateConfig.html}
 \bibitem{gke-upgrade} Google Cloud, ``Node pool upgrade strategies,'' GKE documentation.
-  \url{https://cloud.google.com/kubernetes-engine/docs/concepts/node-pool-upgrade-strategies}
+  \url{https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-pool-upgrade-strategies}
 \bibitem{eks-pod-identity} Amazon Web Services, ``EKS Pod Identity.''
   \url{https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html}
 \bibitem{gke-wi} Google Cloud, ``Workload Identity Federation for GKE.''
-  \url{https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity}
+  \url{https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity}
 \bibitem{gcp-gpu} Google Cloud, ``GPU regions and zones availability.''
-  \url{https://cloud.google.com/compute/docs/gpus/gpu-regions-zones}
+  \url{https://docs.cloud.google.com/compute/docs/gpus/gpu-regions-zones}
 \bibitem{gcp-net-pricing} Google Cloud, ``Network pricing (Premium Tier internet egress).''
   \url{https://cloud.google.com/vpc/network-pricing}
 \bibitem{aws-egress-au} Amazon Web Services, ``AWS data transfer price reductions: up to 34\% (Japan) and 28\% (Australia),'' AWS News Blog.
@@ -493,11 +482,13 @@ L7 Ingress (GCE class, NEG, BackendConfig) was written, but its backends never b
 \bibitem{holori-n1} Holori, ``GCP n1-standard-4 in australia-southeast1'' (third-party calculator).
   \url{https://calculator.holori.com/gcp/vm/n1-standard-4/australia-southeast1}
 \bibitem{s3-pricing} Amazon Web Services, ``Amazon S3 pricing.'' \url{https://aws.amazon.com/s3/pricing/}
+\bibitem{fargate-pricing} Vantage, ``AWS Fargate pricing explained'' (us-east-1 rates: \$0.04048/vCPU-h, \$0.004445/GB-h).
+  \url{https://www.vantage.sh/blog/fargate-pricing}
 \bibitem{aws-g4-sydney} Amazon Web Services, ``Amazon EC2 G4 instances with NVIDIA T4 now available in 6 additional regions (incl.\ Sydney),'' 2019.
   \url{https://aws.amazon.com/about-aws/whats-new/2019/10/amazon-ec2-g4-instances-with-nvidia-t4-tensor-core-gpus-now-available-in-6-additional-regions/}
-\bibitem{cosign} Sigstore, ``Cosign: signing containers.'' \url{https://docs.sigstore.dev/}
+\bibitem{cosign} Sigstore, ``Signing containers with Cosign.'' \url{https://docs.sigstore.dev/cosign/signing/signing_with_containers/}
 \bibitem{oaic} Office of the Australian Information Commissioner, ``The Privacy Act.''
-  \url{https://www.oaic.gov.au/privacy/the-privacy-act}
+  \url{https://www.oaic.gov.au/privacy/privacy-legislation/the-privacy-act}
 \bibitem{smartpark} Y.~Huang, ``SmartPark: ML-based cloud parking platform,'' FIT3184 Assignment 1
   (FastAPI, Docker, GKE, L4 LoadBalancer, optional CPU-based HPA, init-container model and dataset loading),
   Monash University, 2026.

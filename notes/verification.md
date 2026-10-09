@@ -78,3 +78,23 @@ worded cautiously in the report.
 | Init container | `curlimages/curl:8.11.1` downloads `model.pt` and a 300-image `tar.gz` into `emptyDir`; no version pin, no checksum | Report says "kept, now pinned by version and SHA-256" |
 | Deployment tooling | plain YAML, `sed` replaces `${IMAGE}` and `${ASSETS_BUCKET}`, then `kubectl apply -f -`; no Helm/Kustomize | — |
 | L7 Ingress | `ingressClassName: gce` with NEG + BackendConfig; backends never became healthy, never used | Stated as a lesson, not as something that worked |
+
+## Reference link check (final, 9 Oct 2026)
+
+Shell access to documentation hosts is blocked in the build environment, so each URL was checked
+through web search results (official page or its regional/markdown twin returned).
+
+| Ref | URL status |
+|---|---|
+| AWS VPN quotas, S3 conditional writes, EKS NodegroupUpdateConfig, EKS Pod Identity | official page found (EKS pages via `.md`/`en_us` twins of the same path) |
+| AWS STS AssumeRole | standard API-reference path; content confirmed via AWS SDK mirrors |
+| GCP HA VPN↔AWS, GCS preconditions, GKE upgrade strategies, GKE Workload Identity, GPU regions | switched to canonical `docs.cloud.google.com` URLs (the old `cloud.google.com/...` paths 301-redirect there) |
+| GCP network pricing, GPU pricing | `cloud.google.com` pricing pages found |
+| Patroni replication modes | official page found; watchdog page confirmed via mirrors of the same text |
+| PostgreSQL warm-standby / sql-select / functions-datetime / ddl-rowsecurity | standard `docs/current/` paths (row-security page found directly; others via versioned mirrors) |
+| etcd FAQ v3.5 | v3.5 anchor confirmed via a link; same section text found in v3.3/v3.1 |
+| KEDA ScaledJob spec 2.16 | official page found |
+| Kleppmann "How to do distributed locking" | canonical URL, content confirmed via secondary write-ups |
+| Cosign | changed to the specific "Signing containers" page (found) |
+| OAIC Privacy Act | changed to `/privacy/privacy-legislation/the-privacy-act` (current OAIC section; child pages found) |
+| AWS 2018 Australia data-transfer blog, G4 Sydney announcement, DoiT g4dn, Holori n1, S3 pricing, Vantage Fargate pricing | found in search results |

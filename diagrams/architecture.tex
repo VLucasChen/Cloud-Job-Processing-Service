@@ -25,24 +25,21 @@
   lbl/.style={font=\tiny, align=center, inner sep=1pt},
 }
 
-% One cloud = 4 rows. #1 = +1 (AWS, left) or -1 (GCP, mirrored), #2 = x origin.
 \begin{document}
 \begin{tikzpicture}
 
 % ================= top row: external services
-\node[ext, minimum width=3.2cm] (users) at (1.6,9.55)
-  {\textbf{Partner users / scripts}\\one tenant per partner};
-\node[ext, minimum width=3.0cm] (idp) at (5.05,9.55)
+\node[ext, minimum width=2.8cm] (idp) at (1.45,9.55)
   {\textbf{Partner IdP} (OIDC + MFA)\\JWT carries \texttt{tenant\_id}};
-\node[ext, minimum width=3.6cm] (dns) at (8.8,9.55)
-  {\textbf{Global DNS + health checks}\\routes partners to a healthy job service};
-\node[ext, minimum width=4.0cm] (wit) at (15.6,9.55)
-  {\textbf{etcd voter 3: quorum witness}\\third site $\cdot$ no job data, no processing};
+\node[ext, minimum width=3.2cm] (users) at (5.15,9.55)
+  {\textbf{Partner users / scripts}\\one tenant per partner};
+\node[ext, minimum width=4.4cm] (dns) at (10.0,9.55)
+  {\textbf{Global DNS + health checks}\\checks both job services, routes to a healthy one};
 
 % ================= AWS (left)
 \node[ctl, minimum width=3.8cm] (jobA) at (2.15,7.7)
   {\textbf{Job service}\\Fargate, stateless, $\geq$2 tasks\\API $\cdot$ leases $\cdot$ reaper $\cdot$ GC};
-\node[ctl, minimum width=3.05cm, fill=awsF!60] (dbA) at (6.075,7.7)
+\node[ctl, minimum width=2.8cm, fill=awsF!60] (dbA) at (6.2,7.7)
   {\textbf{PostgreSQL+Patroni}\\LEADER\\etcd voter 1};
 \node[cmp, minimum width=3.5cm] (cpuA) at (2.0,5.95)
   {\textbf{CPU pool}: spot, 0--7 VMs\\stage 1 prep $\cdot$ stage 3 report};
@@ -50,7 +47,7 @@
   {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (T4)};
 \node[sto, minimum width=7.35cm, text width=7.15cm] (s3) at (3.925,4.35)
   {\textbf{S3: one bucket per tenant} (SSE-KMS, per-tenant key)\\
-   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/}}};
+   {\fontsize{6}{7}\selectfont\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} create-only $\cdot$ \texttt{reports/}}};
 \node[anchor=west, align=left, font=\tiny] (noteA) at (0.25,3.2)
   {\scriptsize\textbf{\textcolor{awsB}{AWS ap-southeast-2 (Sydney)}}\\
    EKS $\cdot$ 1 system/state node $\cdot$ KEDA ScaledJobs\\single-use pods $\cdot$ GPU taints $\cdot$ ECR (digest-pinned, signed)};
@@ -63,7 +60,7 @@
 % ================= GCP (right, mirrored: x' = 17.6 - x)
 \node[ctl, minimum width=3.8cm] (jobG) at (15.45,7.7)
   {\textbf{Job service}\\Cloud Run, stateless, active\\writes $\rightarrow$ current DB leader};
-\node[ctl, minimum width=3.05cm, fill=gcpF!60] (dbG) at (11.525,7.7)
+\node[ctl, minimum width=2.8cm, fill=gcpF!60] (dbG) at (11.4,7.7)
   {\textbf{PostgreSQL+Patroni}\\SYNC STANDBY\\etcd voter 2};
 \node[cmp, minimum width=3.5cm] (cpuG) at (15.6,5.95)
   {\textbf{CPU pool}: spot, 0--7 VMs\\stage 1 prep $\cdot$ stage 3 report};
@@ -71,7 +68,7 @@
   {\textbf{GPU pool}: on-demand, 0--2 VMs\\stage 2 species ID (T4)};
 \node[sto, minimum width=7.35cm, text width=7.15cm] (gcs) at (13.675,4.35)
   {\textbf{GCS: one bucket per tenant} (CMEK, per-tenant key)\\
-   {\tiny\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} (create-only) $\cdot$ \texttt{reports/} (copies)}};
+   {\fontsize{6}{7}\selectfont\texttt{input/} $\cdot$ \texttt{stage\{n\}/attempt-\{uuid\}/} create-only $\cdot$ \texttt{reports/}}};
 \node[anchor=east, align=right, font=\tiny] (noteG) at (17.35,3.2)
   {\scriptsize\textbf{\textcolor{gcpB}{GCP australia-southeast1 (Sydney)}}\\
    GKE $\cdot$ 1 system/state node $\cdot$ KEDA ScaledJobs\\single-use pods $\cdot$ GPU taints $\cdot$ Artifact Registry};
@@ -81,29 +78,41 @@
 \node[box=gcpB, fill=gcpF, line width=0.9pt, fit=(jobG)(dbG)(cpuG)(gpuG)(gcs)(noteG)(kmsG), inner sep=5pt] (gcp) {};
 \end{scope}
 
+% ================= quorum witness: outside both clouds (third site)
+\node[box=rep, fill=white, line width=0.6pt, minimum width=1.8cm, font=\tiny] (wit) at (8.8,6.95)
+  {\textbf{etcd voter 3}\\quorum witness\\third site, no job data};
+\draw[dashed, rep, biarr] (wit.west) -| (dbA.south -| 7.05,0);
+\draw[dashed, rep, biarr] (wit.east) -| (dbG.south -| 10.55,0);
+
 % ================= cross-cloud links (teal)
-\draw[arr, rep, dashed] (dbA.east) -- node[lbl, above, text=rep] {sync\\repl.} (dbG.west);
-\draw[biarr, rep, dotted] (gpuA.east) -- node[lbl, above, text=rep] {GPU spill:\\prepared\\data only} (gpuG.west);
+\draw[arr, rep, dashed] (dbA.east) -- node[lbl, above, text=rep] {sync repl.\\every commit} (dbG.west);
+\draw[biarr, rep, dotted] (gpuA.east) -- node[lbl, below, text=rep] {GPU spill:\\prepared\\data only} (gpuG.west);
 \draw[biarr, rep, dashed] (s3.east) -- node[lbl, above, text=rep] {report\\copies} (gcs.west);
 \node[lbl, text=rep, font=\tiny\bfseries] at (8.8,3.2) {HA VPN\\(IPsec, BGP)\\+ mTLS};
 
 % ================= lifecycle (red, numbered)
-\draw[arr, flow] (users.east) -- node[stepn, above] {1} (idp.west);
-\draw[arr, flow] (users.south -| 1.3,0) -- node[stepn, left] {2} (jobA.north -| 1.3,0);
-\draw[biarr, flow] (users.west) -- ++(-0.4,0) |- node[stepn, pos=0.35, left] {3} node[stepn, pos=0.6, left] {7} (s3.west);
-\draw[arr, flow] (jobA.east) -- node[stepn, above] {4} (dbA.west);
+% 1: log in at the IdP
+\draw[arr, flow] (users.west) -- node[stepn, above=1pt] {1} (idp.east);
+% 2: submit via DNS to a healthy job service (AWS solid = traced job, GCP dashed = alternative)
+\draw[arr, flow] (users.east) -- node[stepn, above=1pt] {2} (dns.west);
+\draw[arr, flow] (dns.south -| 8.6,0) -- ++(0,-0.45) -| (jobA.north -| 3.3,0);
+\draw[arr, extB, dashed] (dns.south -| 11.2,0) -- ++(0,-0.45) -| node[lbl, pos=0.25, above, text=extB] {or GCP (healthy / AWS down)} (jobG.north -| 14.3,0);
+% 3: upload, 7: download (separate paths, presigned URLs)
+\draw[arr, flow] (users.south -| 4.1,0) -- (4.1,8.86) -- (-0.4,8.86) |- node[stepn, pos=0.35, left] {3} ($(s3.west)+(0,0.15)$);
+\draw[arr, flow] ($(s3.west)+(0,-0.15)$) -| node[stepn, pos=0.75, left] {7} (-0.8,9.0) -- (3.7,9.0) -- (users.south -| 3.7,0);
+% 4: accept commit
+\draw[arr, flow] (jobA.east) -- node[stepn, above=1pt] {4} (dbA.west);
+% 5: runners pull leases (both pools)
 \draw[arr, flow] (cpuA.north -| 1.2,0) -- node[stepn, left] {5} (jobA.south -| 1.2,0);
-\draw[arr, flow] (gpuA.north -| 5.2,0) |- (3.5,6.85) -- (jobA.south -| 3.5,0);
+\draw[arr, flow] (gpuA.north -| 5.2,0) |- node[stepn, pos=0.75, above] {5} (3.5,6.85) -- (jobA.south -| 3.5,0);
+% 6: read input / write own attempt (both pools)
 \draw[biarr, flow] (cpuA.south) -- node[stepn, right] {6} (cpuA.south |- s3.north);
-\draw[biarr, flow] (gpuA.south) -- (gpuA.south |- s3.north);
+\draw[biarr, flow] (gpuA.south) -- node[stepn, right] {6} (gpuA.south |- s3.north);
+% GCP side: same steps 5-6
 \draw[arr, flow] (cpuG.north -| 16.4,0) -- (jobG.south -| 16.4,0);
 \draw[arr, flow] (gpuG.north -| 12.4,0) |- (14.1,6.85) -- (jobG.south -| 14.1,0);
 \draw[biarr, flow] (cpuG.south) -- (cpuG.south |- gcs.north);
 \draw[biarr, flow] (gpuG.south) -- (gpuG.south |- gcs.north);
-
-% ================= etcd quorum links (teal, dashed)
-\draw[dashed, rep, biarr] (wit.south -| 14.6,0) |- (11.9,8.8) -- (dbG.north -| 11.9,0);
-\draw[dashed, rep, biarr] (wit.south -| 14.0,0) |- (6.4,8.95) -- (dbA.north -| 6.4,0);
 
 % ================= bottom row
 \node[ext, minimum width=8.6cm, text width=8.4cm, anchor=north west] (obs) at ($(aws.south west)+(0,-0.2)$)
@@ -113,12 +122,13 @@
   {\textbf{CI/CD + IaC}: GitHub Actions (OIDC) $\rightarrow$ Terraform (both clouds)\\{\tiny plain YAML + \texttt{kubectl apply} from CI (digest-pinned) $\cdot$ images signed, pushed to both registries}
 };
 
-\node[anchor=north west, font=\scriptsize, align=left, text width=17.3cm] at ($(obs.south west)+(0,-0.1)$)
-  {\textcolor{flow}{\textbf{Job lifecycle}}: (1) log in; (2) \texttt{POST /jobs}, routed by DNS to a healthy job service;
-   (3) multipart upload straight to presigned URLs in the home cloud; (4) on \texttt{submit}: SHA-256 verified, \texttt{ACCEPTED} committed synchronously in \emph{both} clouds, \texttt{202};
-   (5) runners pull a lease for their pool; (6) read the published input, write a create-only attempt prefix; the coordinator publishes it with a fenced conditional commit;
-   (7) report verified in the home cloud, \texttt{COMPLETED}, second copy added by a tracked copier; download via a presigned URL.
-   \textcolor{rep}{\textbf{Teal}}: cross-cloud traffic. Patroni elects one DB leader through a 3-voter etcd quorum (AWS, GCP, witness); every commit is flushed in both clouds. VM cap: 2 system/state + 14 CPU + 4 GPU = 20.};
+\node[anchor=north west, font=\scriptsize, align=left, text width=17.6cm] at ($(obs.south west)+(-0.6,-0.1)$)
+  {\textcolor{flow}{\textbf{Job lifecycle}} (steps 5--6 run the same way in GCP): (1) log in at the partner IdP;
+   (2) \texttt{POST /jobs}; DNS sends it to a healthy job service (here AWS); (3) upload to presigned URLs in the home cloud;
+   (4) \texttt{submit}: SHA-256 verified, \texttt{ACCEPTED} committed synchronously in \emph{both} clouds, \texttt{202};
+   (5) runners pull a lease; (6) read the published input, write a create-only attempt, fenced commit;
+   (7) once \texttt{COMPLETED}, download the report via a presigned URL. Job services validate JWTs locally with the IdP's cached keys (JWKS).
+   \textcolor{rep}{\textbf{Teal}}: cross-cloud traffic; etcd voters 1--3 elect one DB leader. VM cap: 2 system/state + 14 CPU + 4 GPU = 20.};
 
 \end{tikzpicture}
 \end{document}
